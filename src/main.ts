@@ -1,10 +1,11 @@
 import "./style.css";
 import { Character } from "./character";
 import { TtsController } from "./tts";
-import { loadState, saveState, type AppMode, type DialogTurn } from "./storage";
+import { loadState, saveState, type AppMode, type DialogModeName, type DialogTurn } from "./storage";
 import { EMOTION_NAMES, type EmotionName } from "./poses";
 import { zeroWeights } from "./blend";
 import { Eliza } from "./eliza";
+import { getAgentReply, fetchUsage, type UsageSnapshot } from "./agent";
 
 const EMOTION_LABELS: Record<EmotionName, string> = {
   joy: "Joy",
@@ -67,14 +68,16 @@ const stopBtn = document.getElementById("stop-btn") as HTMLButtonElement;
 // pill for that reply can be deferred until speech actually starts instead
 // of appearing during the pre-speech pause.
 let pendingAgentReply: string | null = null;
+let pendingAgentMode: DialogModeName | null = null;
 
 const tts = new TtsController({
   onMouthPulse: (intensity) => character.pulseMouth(intensity),
   onStart: () => {
     speakBtn.disabled = true;
-    if (pendingAgentReply !== null) {
-      addTurn("agent", pendingAgentReply);
+    if (pendingAgentReply !== null && pendingAgentMode !== null) {
+      addTurn(pendingAgentMode, "agent", pendingAgentReply);
       pendingAgentReply = null;
+      pendingAgentMode = null;
     }
   },
   onEnd: () => {
@@ -163,38 +166,90 @@ voiceSelect.addEventListener("change", () => {
 populateVoices();
 tts.onVoicesChanged(populateVoices);
 
-// --- Mode toggle ---
+// --- Usage indicator ---
+// Reflects the server-enforced daily token budget (server/usage.ts). This is
+// a display of that hard limit, not the enforcement itself — the backend
+// refuses requests once the budget is hit regardless of what the UI shows.
+
+const usageBarFill = document.getElementById("usage-bar-fill")!;
+const usageText = document.getElementById("usage-text")!;
+let lastUsage: UsageSnapshot | null = null;
+
+function updateUsageDisplay(usage: UsageSnapshot | null): void {
+  lastUsage = usage;
+
+  if (!usage) {
+    usageBarFill.style.width = "0%";
+    usageBarFill.className = "usage-bar-fill";
+    usageText.className = "usage-text";
+    usageText.textContent = "Usage tracking unavailable — start the backend (npm run server) to enable it.";
+  } else {
+    const percent = usage.budget > 0 ? Math.min(100, (usage.totalTokens / usage.budget) * 100) : 100;
+    const exceeded = usage.remaining <= 0;
+    usageBarFill.style.width = `${percent}%`;
+    usageBarFill.className = `usage-bar-fill ${exceeded ? "usage-exceeded" : percent >= 80 ? "usage-warning" : ""}`;
+    usageText.className = `usage-text ${exceeded ? "usage-exceeded" : ""}`;
+    usageText.textContent =
+      `Reflection usage today: ${usage.totalTokens.toLocaleString()} / ${usage.budget.toLocaleString()} tokens ` +
+      `(~$${usage.estimatedCostUsd.toFixed(3)})` +
+      (exceeded ? " — daily budget reached, resets at midnight" : "");
+  }
+
+  const shouldDisableChat = usage !== null && usage.remaining <= 0 && state.mode === "reflection";
+  chatInput.disabled = shouldDisableChat;
+  chatSendBtn.disabled = shouldDisableChat;
+  chatInput.placeholder = shouldDisableChat
+    ? "Daily token budget reached — try again tomorrow, or switch to Eliza."
+    : "Say something...";
+}
+
+// --- Mode switching ---
 
 const appRoot = document.getElementById("app-root")!;
 const modeBadge = document.getElementById("mode-badge")!;
-const modeToggleBtn = document.getElementById("mode-toggle") as HTMLButtonElement;
+const modeSelect = document.getElementById("mode-select") as HTMLSelectElement;
 const testModePanels = document.getElementById("test-mode-panels")!;
 const dialogModePanels = document.getElementById("dialog-mode-panels")!;
 
-function applyMode(mode: AppMode): void {
-  state.mode = mode;
-  const isDialog = mode === "dialog";
-  appRoot.classList.toggle("dialog-mode", isDialog);
-  testModePanels.classList.toggle("hidden", isDialog);
-  dialogModePanels.classList.toggle("hidden", !isDialog);
-  modeBadge.textContent = isDialog ? "dialog mode" : "test mode";
-  modeToggleBtn.textContent = isDialog ? "Switch to test mode" : "Switch to dialog mode";
-  // No slider UI in dialog mode, so the character reads as neutral there;
-  // switching back to test mode restores whatever the sliders are set to.
-  character.setEmotionWeights(isDialog ? zeroWeights() : state.sliders);
-  if (isDialog) scrollDialogToBottom();
+const MODE_LABELS: Record<AppMode, string> = {
+  test: "test script mode",
+  eliza: "eliza mode",
+  reflection: "reflection mode",
+};
+
+function isDialogMode(mode: AppMode): mode is DialogModeName {
+  return mode === "eliza" || mode === "reflection";
 }
 
-modeToggleBtn.addEventListener("click", () => {
-  applyMode(state.mode === "dialog" ? "test" : "dialog");
+function applyMode(mode: AppMode): void {
+  state.mode = mode;
+  const isDialog = isDialogMode(mode);
+  appRoot.classList.toggle("dialog-mode", isDialog);
+  testModePanels.classList.toggle("hidden", mode !== "test");
+  dialogModePanels.classList.toggle("hidden", !isDialog);
+  modeBadge.textContent = MODE_LABELS[mode];
+  modeSelect.value = mode;
+  // No slider UI in dialog modes, so the character reads as neutral there;
+  // switching back to test mode restores whatever the sliders are set to.
+  character.setEmotionWeights(isDialog ? zeroWeights() : state.sliders);
+  if (isDialog) showDialogMode(mode);
+  updateUsageDisplay(lastUsage); // re-evaluate the chat-input gate for the new mode
+}
+
+modeSelect.addEventListener("change", () => {
+  applyMode(modeSelect.value as AppMode);
   saveState(state);
 });
 
-// --- Dialog mode ---
+// --- Dialog modes (Eliza and Reflection) ---
+// Each dialog mode keeps its own conversation history and its own reply
+// source (eliza.respond() vs. the LLM backend), but shares the same chat
+// UI, pre-speech pause, and mouth-sync pipeline.
 
 const dialogHistoryEl = document.getElementById("dialog-history")!;
 const chatForm = document.getElementById("chat-form") as HTMLFormElement;
 const chatInput = document.getElementById("chat-input") as HTMLInputElement;
+const chatSendBtn = document.getElementById("chat-send-btn") as HTMLButtonElement;
 const resetDialogBtn = document.getElementById("reset-dialog-btn") as HTMLButtonElement;
 const eliza = new Eliza();
 
@@ -203,6 +258,26 @@ const eliza = new Eliza();
 const AGENT_PAUSE_MIN_MS = 500;
 const AGENT_PAUSE_MAX_MS = 1200;
 let pendingSpeakTimer: number | null = null;
+
+// Bumped whenever a mode's history is reset, so a reply already in flight
+// when that happens doesn't reappear after the conversation was cleared.
+const dialogEpoch: Record<DialogModeName, number> = { eliza: 0, reflection: 0 };
+
+let typingIndicatorEl: HTMLDivElement | null = null;
+
+function showTypingIndicator(): void {
+  hideTypingIndicator();
+  typingIndicatorEl = document.createElement("div");
+  typingIndicatorEl.className = "chat-pill agent typing";
+  typingIndicatorEl.innerHTML = "<span></span><span></span><span></span>";
+  dialogHistoryEl.appendChild(typingIndicatorEl);
+  scrollDialogToBottom();
+}
+
+function hideTypingIndicator(): void {
+  typingIndicatorEl?.remove();
+  typingIndicatorEl = null;
+}
 
 function scrollDialogToBottom(): void {
   dialogHistoryEl.scrollTop = dialogHistoryEl.scrollHeight;
@@ -215,37 +290,74 @@ function renderTurn(turn: DialogTurn): void {
   dialogHistoryEl.appendChild(pill);
 }
 
-function addTurn(speaker: DialogTurn["speaker"], text: string): void {
+function addTurn(modeName: DialogModeName, speaker: DialogTurn["speaker"], text: string): void {
   const turn: DialogTurn = { speaker, text };
-  state.dialogHistory.push(turn);
+  state.dialogHistories[modeName].push(turn);
   saveState(state);
-  renderTurn(turn);
+  // Only touch the live DOM if this mode's conversation is the one on screen.
+  if (state.mode === modeName) {
+    renderTurn(turn);
+    scrollDialogToBottom();
+  }
+}
+
+function seedIfEmpty(modeName: DialogModeName): void {
+  if (state.dialogHistories[modeName].length > 0) return;
+  if (modeName === "eliza") {
+    addTurn("eliza", "agent", eliza.introNotice());
+    addTurn("eliza", "agent", eliza.greeting());
+  } else {
+    addTurn("reflection", "agent", "Hi! What's on your mind?");
+  }
+}
+
+function showDialogMode(modeName: DialogModeName): void {
+  dialogHistoryEl.innerHTML = "";
+  hideTypingIndicator();
+  const history = state.dialogHistories[modeName];
+  if (history.length === 0) {
+    seedIfEmpty(modeName); // renders as it adds, since this mode is now active
+  } else {
+    for (const turn of history) renderTurn(turn);
+  }
   scrollDialogToBottom();
 }
 
-function seedInitialDialog(): void {
-  addTurn("agent", eliza.introNotice());
-  addTurn("agent", eliza.greeting());
-}
+function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
+  if (pendingSpeakTimer !== null) window.clearTimeout(pendingSpeakTimer);
 
-if (state.dialogHistory.length === 0) {
-  seedInitialDialog();
-} else {
-  for (const turn of state.dialogHistory) renderTurn(turn);
+  if (!tts.isSupported()) {
+    // No speech to wait for — fall back to showing the reply immediately.
+    addTurn(modeName, "agent", reply);
+    return;
+  }
+
+  const pause = AGENT_PAUSE_MIN_MS + Math.random() * (AGENT_PAUSE_MAX_MS - AGENT_PAUSE_MIN_MS);
+  pendingAgentReply = reply;
+  pendingAgentMode = modeName;
+  pendingSpeakTimer = window.setTimeout(() => {
+    pendingSpeakTimer = null;
+    tts.speak(reply);
+  }, pause);
 }
 
 resetDialogBtn.addEventListener("click", () => {
+  const modeName = state.mode as DialogModeName;
+  dialogEpoch[modeName]++;
   if (pendingSpeakTimer !== null) {
     window.clearTimeout(pendingSpeakTimer);
     pendingSpeakTimer = null;
   }
   pendingAgentReply = null;
+  pendingAgentMode = null;
+  hideTypingIndicator();
   tts.stop();
-  eliza.reset();
-  state.dialogHistory = [];
+  if (modeName === "eliza") eliza.reset();
+  state.dialogHistories[modeName] = [];
   dialogHistoryEl.innerHTML = "";
   saveState(state);
-  seedInitialDialog();
+  seedIfEmpty(modeName);
+  scrollDialogToBottom();
 });
 
 chatForm.addEventListener("submit", (event) => {
@@ -253,24 +365,24 @@ chatForm.addEventListener("submit", (event) => {
   const text = chatInput.value.trim();
   if (!text) return;
 
+  const modeName = state.mode as DialogModeName;
   chatInput.value = "";
-  addTurn("user", text);
+  addTurn(modeName, "user", text);
 
-  const reply = eliza.respond(text);
-
-  if (pendingSpeakTimer !== null) window.clearTimeout(pendingSpeakTimer);
-  if (!tts.isSupported()) {
-    // No speech to wait for — fall back to showing the reply immediately.
-    addTurn("agent", reply);
+  if (modeName === "eliza") {
+    scheduleAgentSpeech("eliza", eliza.respond(text));
     return;
   }
 
-  const pause = AGENT_PAUSE_MIN_MS + Math.random() * (AGENT_PAUSE_MAX_MS - AGENT_PAUSE_MIN_MS);
-  pendingAgentReply = reply;
-  pendingSpeakTimer = window.setTimeout(() => {
-    pendingSpeakTimer = null;
-    tts.speak(reply);
-  }, pause);
+  const epoch = dialogEpoch.reflection;
+  showTypingIndicator();
+  getAgentReply(state.dialogHistories.reflection).then((result) => {
+    hideTypingIndicator();
+    updateUsageDisplay(result.usage);
+    if (dialogEpoch.reflection !== epoch) return; // conversation was reset meanwhile
+    scheduleAgentSpeech("reflection", result.reply);
+  });
 });
 
+fetchUsage().then(updateUsageDisplay);
 applyMode(state.mode);

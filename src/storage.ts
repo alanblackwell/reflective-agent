@@ -2,7 +2,8 @@ import { zeroWeights, type EmotionWeights } from "./blend";
 
 const STORAGE_KEY = "reflective-agent:app-state";
 
-export type AppMode = "test" | "dialog";
+export type AppMode = "test" | "eliza" | "reflection";
+export type DialogModeName = "eliza" | "reflection";
 
 export interface DialogTurn {
   speaker: "user" | "agent";
@@ -16,7 +17,7 @@ export interface PersistedState {
   voiceURI: string | null;
   pitch: number;
   rate: number;
-  dialogHistory: DialogTurn[];
+  dialogHistories: Record<DialogModeName, DialogTurn[]>;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
@@ -25,13 +26,13 @@ const DEFAULT_RATE = 0.5;
 
 function defaultState(): PersistedState {
   return {
-    mode: "test",
+    mode: "reflection",
     sliders: zeroWeights(),
     lastScript: "",
     voiceURI: null,
     pitch: DEFAULT_PITCH,
     rate: DEFAULT_RATE,
-    dialogHistory: [],
+    dialogHistories: { eliza: [], reflection: [] },
   };
 }
 
@@ -41,21 +42,31 @@ function isDialogTurn(value: unknown): value is DialogTurn {
   return (turn.speaker === "user" || turn.speaker === "agent") && typeof turn.text === "string";
 }
 
+function parseHistories(value: unknown): Record<DialogModeName, DialogTurn[]> {
+  const obj = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    eliza: Array.isArray(obj.eliza) ? obj.eliza.filter(isDialogTurn) : [],
+    reflection: Array.isArray(obj.reflection) ? obj.reflection.filter(isDialogTurn) : [],
+  };
+}
+
 export function loadState(): PersistedState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw);
+    const mode: AppMode =
+      parsed.mode === "test" || parsed.mode === "eliza" || parsed.mode === "reflection"
+        ? parsed.mode
+        : "reflection";
     return {
-      mode: parsed.mode === "dialog" ? "dialog" : "test",
+      mode,
       sliders: { ...zeroWeights(), ...parsed.sliders },
       lastScript: typeof parsed.lastScript === "string" ? parsed.lastScript : "",
       voiceURI: typeof parsed.voiceURI === "string" ? parsed.voiceURI : null,
       pitch: typeof parsed.pitch === "number" ? parsed.pitch : DEFAULT_PITCH,
       rate: typeof parsed.rate === "number" ? parsed.rate : DEFAULT_RATE,
-      dialogHistory: Array.isArray(parsed.dialogHistory)
-        ? parsed.dialogHistory.filter(isDialogTurn)
-        : [],
+      dialogHistories: parseHistories(parsed.dialogHistories),
     };
   } catch {
     return defaultState();

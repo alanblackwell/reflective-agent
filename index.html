@@ -9,8 +9,17 @@
   <body>
     <main class="app" id="app-root">
       <div class="app-header">
-        <h1>Reflective Agent <span class="mode-badge" id="mode-badge">test mode</span></h1>
-        <button id="mode-toggle" type="button">Switch to dialog mode</button>
+        <h1>Reflective Agent <span class="mode-badge" id="mode-badge">reflection mode</span></h1>
+        <select id="mode-select">
+          <option value="test">Test script</option>
+          <option value="eliza">Eliza</option>
+          <option value="reflection" selected>Reflection</option>
+        </select>
+      </div>
+
+      <div id="usage-panel" class="usage-panel">
+        <div class="usage-bar"><div id="usage-bar-fill" class="usage-bar-fill"></div></div>
+        <div id="usage-text" class="usage-text">Loading usage…</div>
       </div>
 
       <div id="character-stage"></div>
@@ -64,7 +73,7 @@
             autocomplete="off"
             placeholder="Say something..."
           />
-          <button type="submit">Send</button>
+          <button id="chat-send-btn" type="submit">Send</button>
         </form>
       </div>
     </main>

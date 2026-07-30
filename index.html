@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reflective Agent</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="app" id="app-root">
+      <div class="app-header">
+        <h1>Reflective Agent <span class="mode-badge" id="mode-badge">test mode</span></h1>
+        <button id="mode-toggle" type="button">Switch to dialog mode</button>
+      </div>
+
+      <div id="character-stage"></div>
+
+      <div id="test-mode-panels">
+        <section class="panel sliders-panel">
+          <h2>Emotion sliders</h2>
+          <div id="sliders"></div>
+        </section>
+
+        <section class="panel voice-panel">
+          <h2>Voice</h2>
+          <div class="voice-row">
+            <label for="voice-select">Voice</label>
+            <select id="voice-select"></select>
+          </div>
+          <div class="slider-row">
+            <label for="pitch-slider">Pitch</label>
+            <input id="pitch-slider" type="range" min="0" max="2" step="0.05" value="1" />
+            <output id="pitch-output">1.00</output>
+          </div>
+          <div class="slider-row">
+            <label for="rate-slider">Rate</label>
+            <input id="rate-slider" type="range" min="0.5" max="2" step="0.05" value="1" />
+            <output id="rate-output">1.00</output>
+          </div>
+        </section>
+
+        <section class="panel script-panel">
+          <h2>Script</h2>
+          <textarea
+            id="script-input"
+            placeholder="Paste text here for the agent to read aloud..."
+          ></textarea>
+          <div class="script-controls">
+            <button id="speak-btn" type="button">Speak</button>
+            <button id="stop-btn" type="button">Stop</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="dialog-mode-panels" class="hidden">
+        <div class="dialog-toolbar">
+          <button id="reset-dialog-btn" type="button">Reset conversation</button>
+        </div>
+        <div id="dialog-history" class="panel dialog-history"></div>
+        <form id="chat-form" class="chat-form">
+          <input
+            id="chat-input"
+            type="text"
+            autocomplete="off"
+            placeholder="Say something..."
+          />
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

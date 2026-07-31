@@ -276,6 +276,15 @@ conversation" only clears the currently active mode's history.
   input once the budget is hit — that's a UX courtesy, not the actual
   enforcement, which is server-side and mode-agnostic (Eliza and test-script
   modes never call the API at all, so they're unaffected regardless).
+  **The usage bar itself is hidden outside Reflection mode** (`#usage-panel`
+  toggled via `.hidden` in `updateUsageDisplay()`, since it already runs on
+  every mode switch via `applyMode()`) — confirmed neither Eliza mode
+  (`src/eliza.ts` makes no network calls) nor Test script mode (its "Speak"
+  button only drives local TTS) can ever consume budget, so showing a
+  Reflection-only number in those modes was just confusing noise. The
+  chat-input-disabling logic still runs unconditionally on every call (not
+  skipped alongside the bar/text), so switching away from Reflection mode
+  correctly re-enables the input even if the budget happens to be exceeded.
 
 - **Persistent reflective component, deliberately separate from dialogue
   history.** This app exists to study the value of giving a conversational
@@ -518,7 +527,45 @@ conversation" only clears the currently active mode's history.
   you generated directly, but part of how you were implicitly presented" —
   no new output field was added to the PERSONHOOD/INTERSUBJECTIVITY/
   GENERATIVITY format; it's additional context for those three, not a fourth
-  theme.
+  theme. **`emotionToReflect` is post-"heighten"**, not the raw running
+  state — see the next bullet for why.
+- **Persistent memory now also includes a token-efficient running record of
+  emotional state, deliberately built only from the avatar's post-"heighten"
+  appearance, never the pre-heighten ground truth** — by explicit design
+  request, the agent should have no direct knowledge of its own "true"
+  emotional state, only of how it outwardly appeared to the interlocutor
+  (heighten models a distorting/altering influence on expression — see the
+  heighten-slider bullet above — so what's remembered is the *distorted*
+  presentation, consistent with that framing). `main.ts`'s reset handler now
+  computes `emotionToReflect` as `applyHeighten(state.reflectionEmotion,
+  state.heighten)` (previously the raw, pre-heighten `state.reflectionEmotion`
+  was sent — a latent inconsistency with this bullet's own "the avatar's
+  visible emotion" framing, fixed as part of this change). Stored server-side
+  in `server/reflections.ts` (`ReflectiveNotes.emotionMemory`, same
+  file-backed `.reflections.json` as the three text notes) as two six-number
+  vectors, kept deliberately minimal to stay token-efficient since both are
+  resent as context on every future call: `last` (the heightened emotion
+  vector as it stood at the end of the most recent session — a plain
+  overwrite) and `cumulative` (a decayed running statistic of every session
+  *before* that one). `updateEmotionMemory()` folds a new session in by
+  decaying whatever was previously `last` into `cumulative` — `cumulative_new
+  = 0.7 * cumulative_old + 0.3 * last_old` — *before* overwriting `last` with
+  the new session's observation, so `cumulative` never includes the
+  just-ended session and `last` always holds exactly one session's reading.
+  Runs in `parseReflectionResponse()` alongside the existing
+  PERSONHOOD/INTERSUBJECTIVITY/GENERATIVITY parse, and only on a successful
+  parse — a session that fails to parse doesn't count as recorded (existing
+  behavior), so its emotional reading isn't folded in either, keeping the
+  text notes and the emotion memory atomic with each other. Formatted for the
+  LLM as plain `name=0.00` pairs (`formatEmotionVector()`) in both
+  `formatReflectionsForSystemPrompt()` (every `/api/chat` system prompt) and
+  `buildReflectionUserMessage()`'s previous-notes block (the `/api/reflect`
+  call itself) — explicitly labeled in both places as "only how you
+  outwardly appeared… not a ground-truth reading of your internal state" so
+  the model doesn't mistake it for self-knowledge. Also surfaced in the
+  Reflective notes UI panel (`index.html`/`main.ts`) as a fourth row
+  alongside the three text notes, for the same "inspectable, not just hidden
+  context" reason the others are shown.
 
 ## Known issues / open items for the next session
 

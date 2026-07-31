@@ -118,10 +118,22 @@ export async function fetchUsage(): Promise<UsageSnapshot | null> {
 // The agent's persistent memory across Reflection-mode sessions — running
 // notes on three fixed themes, stored server-side (see server/reflections.ts).
 // Dialogue content itself is never required to persist between sessions.
+// Mirrors server/reflections.ts's EmotionMemory: `last` is the heightened
+// emotion vector as it stood at the end of the most recent session, and
+// `cumulative` is a decayed running statistic of every session before that
+// (see updateEmotionMemory() server-side for the fold formula). The agent
+// only ever sees post-"heighten" values here — never the pre-heighten ground
+// truth (see the emotionToReflect snapshot in main.ts).
+export interface EmotionMemory {
+  last: EmotionWeights;
+  cumulative: EmotionWeights;
+}
+
 export interface ReflectiveNotes {
   personhood: string;
   intersubjectivity: string;
   generativity: string;
+  emotionMemory: EmotionMemory;
   sessionCount: number;
   lastUpdated: string | null;
 }

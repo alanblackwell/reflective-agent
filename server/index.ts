@@ -129,7 +129,7 @@ app.post("/api/reflect", async (req, res) => {
 
     const textBlock = response.content.find((block) => block.type === "text");
     const usage = recordUsage(response.usage.input_tokens, response.usage.output_tokens);
-    const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes);
+    const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes, emotion);
     saveReflections(notes);
     res.json({ skipped: false, notes, usage });
   } catch (err) {

@@ -273,12 +273,22 @@ tts.onVoicesChanged(populateVoices);
 // a display of that hard limit, not the enforcement itself — the backend
 // refuses requests once the budget is hit regardless of what the UI shows.
 
+const usagePanel = document.getElementById("usage-panel")!;
 const usageBarFill = document.getElementById("usage-bar-fill")!;
 const usageText = document.getElementById("usage-text")!;
 let lastUsage: UsageSnapshot | null = null;
 
 function updateUsageDisplay(usage: UsageSnapshot | null): void {
   lastUsage = usage;
+
+  // Eliza and Test script modes never call the LLM API (see CLAUDE.md) — the
+  // token budget only applies to Reflection mode, so showing it elsewhere is
+  // just noise. applyMode() already calls this on every mode switch, so this
+  // is the one place that needs to know. Note: the chat-input-disabling logic
+  // below still needs to run unconditionally on every call (not skipped here)
+  // so it can *re-enable* the input when switching away from Reflection mode
+  // while the budget happens to be exceeded.
+  usagePanel.classList.toggle("hidden", state.mode !== "reflection");
 
   if (!usage) {
     usageBarFill.style.width = "0%";
@@ -314,19 +324,37 @@ const reflectionPanel = document.getElementById("reflection-notes-panel")!;
 const reflectionPersonhood = document.getElementById("reflection-personhood")!;
 const reflectionIntersubjectivity = document.getElementById("reflection-intersubjectivity")!;
 const reflectionGenerativity = document.getElementById("reflection-generativity")!;
+const reflectionEmotionEl = document.getElementById("reflection-emotion")!;
 const reflectionStatus = document.getElementById("reflection-status")!;
+
+// Compact, token-efficient-styled readout matching how the memory is
+// formatted for the LLM itself (see formatReflectionsForSystemPrompt() in
+// server/reflections.ts) — two decimal places, no axis/labels beyond the
+// emotion name.
+function formatEmotionVectorForDisplay(vector: EmotionWeights): string {
+  return (Object.keys(vector) as (keyof EmotionWeights)[]).map((name) => `${name} ${vector[name].toFixed(2)}`).join(", ");
+}
 
 function renderReflections(notes: ReflectiveNotes | null): void {
   if (!notes || notes.sessionCount === 0) {
     reflectionPersonhood.textContent = "—";
     reflectionIntersubjectivity.textContent = "—";
     reflectionGenerativity.textContent = "—";
+    reflectionEmotionEl.textContent = "—";
     reflectionStatus.textContent = "No reflections yet — recorded at the end of your first session.";
     return;
   }
   reflectionPersonhood.textContent = notes.personhood;
   reflectionIntersubjectivity.textContent = notes.intersubjectivity;
   reflectionGenerativity.textContent = notes.generativity;
+  // Defensive: a notes object from a stale/legacy server (or a hand-edited
+  // .reflections.json) may not have emotionMemory at all — don't let that
+  // throw and abort the rest of this render (in particular the status line
+  // below, which needs to run regardless).
+  reflectionEmotionEl.textContent = notes.emotionMemory
+    ? `Last session: ${formatEmotionVectorForDisplay(notes.emotionMemory.last)}. ` +
+      `Decayed average before that: ${formatEmotionVectorForDisplay(notes.emotionMemory.cumulative)}.`
+    : "— (no emotion memory recorded yet; restart the backend if you just added this feature)";
   const when = notes.lastUpdated ? new Date(notes.lastUpdated).toLocaleString() : "unknown";
   reflectionStatus.textContent = `Session ${notes.sessionCount} — last updated ${when}`;
 }
@@ -524,8 +552,11 @@ resetDialogBtn.addEventListener("click", () => {
   const historyToReflect = modeName === "reflection" ? [...state.dialogHistories.reflection] : null;
   // Snapshot before seedIfEmpty() below re-seeds state.reflectionEmotion for
   // the new session — this is the emotion as it stood at the end of the
-  // session being reflected on.
-  const emotionToReflect = modeName === "reflection" ? { ...state.reflectionEmotion } : null;
+  // session being reflected on. Heighten is applied here deliberately: this
+  // is what the avatar actually *showed* the interlocutor (and what feeds
+  // the persistent emotion-memory in server/reflections.ts), not the
+  // pre-heighten ground truth the agent has no access to.
+  const emotionToReflect = modeName === "reflection" ? applyHeighten(state.reflectionEmotion, state.heighten) : null;
   dialogEpoch[modeName]++;
   if (pendingSpeakTimer !== null) {
     window.clearTimeout(pendingSpeakTimer);

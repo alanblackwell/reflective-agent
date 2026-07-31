@@ -79,7 +79,12 @@ conversation" only clears the currently active mode's history.
   id="brow-l"/"brow-r">` elements were added from scratch — the original
   artwork had no eyebrows at all, and eyebrows are what the emotion system
   needs for anger/sadness/surprise. The nose was left baked into the static
-  path since nothing needs to animate it.
+  path since nothing needs to animate it. Two more small face-colored shapes
+  (`ear-l-fill`/`ear-r-fill` ellipses, a `neck-fill` rect) cover the ears and
+  the short neck gap between chin and collar, which the main `face-fill`
+  ellipse doesn't reach without overshooting the cheeks — their exact
+  position/radius was hand-tuned directly in the SVG (not computed), so
+  nudge those numbers by eye if the art changes.
 - `src/character.ts` — loads `charlie-brown.svg` (via Vite's `?raw` import,
   parsed with `DOMParser`) rather than building the figure procedurally like
   the old version did. Pulls `mouth`/`eye-l`/`eye-r`/`brow-l`/`brow-r` out by
@@ -120,8 +125,9 @@ conversation" only clears the currently active mode's history.
   fixed themes, plus the prompt-building/parsing for generating and injecting
   them. See "Key decisions" below.
 - `src/storage.ts` — `localStorage` persistence for slider values, voice
-  settings, last test-mode script, current app mode, and the two dialog
-  histories (`eliza`, `reflection`).
+  settings, last test-mode script, current app mode, the two dialog
+  histories (`eliza`, `reflection`), and the speech/animation toggle
+  (`speechEnabled`, see "Key decisions" below).
 - `src/main.ts` — wires everything together; owns the mode dropdown and all
   DOM event handling, including the shared pause/typing-indicator/mouth-sync
   pipeline used by both dialog modes.
@@ -145,6 +151,14 @@ conversation" only clears the currently active mode's history.
   `onstart` event, with a fallback to show immediately if speech synthesis
   is unsupported). This applies to both Eliza and Reflection modes
   (`scheduleAgentSpeech()` in `main.ts`), not just one.
+- **"Speech & animation" header toggle** (`speechEnabled` in `storage.ts`,
+  checked in `scheduleAgentSpeech()`) exists purely to speed up manual
+  testing — when off, dialog-mode replies skip the pre-speech pause and
+  `tts.speak()` entirely and post immediately (same code path as "TTS
+  unsupported"), and the test-mode Speak button is disabled. Doesn't affect
+  the character's emotion-pose rendering itself, only the speech-driven
+  pause/lip-sync — useful when iterating on the Reflection-mode reflective
+  notes without waiting through spoken-out-loud replies each turn.
 - **Default voice tuning**: macOS ships a voice named "Junior" that reads
   younger; it's auto-selected as the default when available, with pitch
   1.65 / rate 0.50 tuned by ear to sound more child-like (closer to the

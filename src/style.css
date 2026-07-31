@@ -23,10 +23,31 @@ body {
   margin: 0 auto;
   padding: 24px 20px 24px;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "header"
+    "usage"
+    "character"
+    "main";
   gap: 20px;
+}
+
+.app-header {
+  grid-area: header;
+}
+
+.usage-panel {
+  grid-area: usage;
+}
+
+#character-stage {
+  grid-area: character;
+}
+
+#test-mode-panels,
+#dialog-mode-panels {
+  grid-area: main;
 }
 
 /* In dialog mode the layout is pinned to the viewport (rather than growing
@@ -36,6 +57,36 @@ body {
   height: 100vh;
   min-height: 0;
   overflow: hidden;
+  grid-template-rows: auto auto auto 1fr;
+}
+
+/* Short viewports (e.g. a shrunk browser window) can't fit the character
+   above the conversation without pushing the chat input off-screen. Below
+   this height, move the character beside the conversation instead of above
+   it, so the message history + text entry area stay reachable. */
+@media (max-height: 750px) {
+  .app.dialog-mode {
+    max-width: 900px;
+    grid-template-columns: 1fr 180px;
+    grid-template-rows: auto auto 1fr;
+    grid-template-areas:
+      "header header"
+      "usage usage"
+      "main character";
+  }
+
+  .app.dialog-mode #character-stage {
+    align-items: center;
+  }
+
+  .app.dialog-mode #character-stage svg {
+    height: 150px;
+    width: auto;
+  }
+
+  .app.dialog-mode .dialog-history {
+    min-height: 120px;
+  }
 }
 
 .app-header {
@@ -53,6 +104,20 @@ h1 {
   display: flex;
   align-items: baseline;
   gap: 10px;
+}
+
+.speech-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #555;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.speech-toggle input {
+  cursor: pointer;
 }
 
 #mode-select {
@@ -134,8 +199,10 @@ h1 {
 }
 
 #character-stage svg {
-  width: 260px;
+  /* Source art is a 210x297 (portrait) viewBox; size by height and let
+     width follow so the figure isn't letterboxed inside a square box. */
   height: 260px;
+  width: auto;
 }
 
 .panel {
@@ -243,6 +310,38 @@ textarea#script-input {
 #dialog-mode-panels {
   flex: 1;
   min-height: 0;
+}
+
+#reflection-notes-panel summary {
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #444;
+}
+
+.reflection-note {
+  margin-top: 12px;
+}
+
+.reflection-note-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #b7791f;
+}
+
+.reflection-note p {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: #333;
+  line-height: 1.4;
+}
+
+.reflection-status {
+  margin-top: 12px;
+  font-size: 0.75rem;
+  color: #888;
 }
 
 .dialog-toolbar {

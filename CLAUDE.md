@@ -66,10 +66,40 @@ conversation" only clears the currently active mode's history.
   Weights aren't required to sum to 1: leftover budget under 1 is filled by
   the neutral pose, and totals over 1 are renormalized, so multiple
   maxed-out sliders still produce a bounded result.
-- `src/character.ts` — builds the SVG line character and runs the
-  `requestAnimationFrame` loop that eases the rendered pose toward the
-  target blended pose each frame (smooth transitions), plus mouth-open
-  pulses driven by speech.
+- `assets/charlie-brown.svg` — the character artwork: a full-body,
+  hand-illustrated Charlie Brown (replacing an earlier procedurally-drawn
+  head-and-shoulders version). Colors (face `#fed5bf`, sweater `#fdd30c`) are
+  plain shapes (`face-fill`, `sweater-fill`) painted *underneath* the
+  original black linework, not edits to the linework itself — the source art
+  is one big hand-traced silhouette path, not per-feature shapes, so
+  recoloring by underlay was far less risky than trying to split fill
+  regions out of it. The mouth and both eyes *were* surgically extracted
+  from that same monolithic path into their own `<path id="mouth"/"eye-l"/"eye-r">`
+  elements (see `src/character.ts` below for why), and two `<line
+  id="brow-l"/"brow-r">` elements were added from scratch — the original
+  artwork had no eyebrows at all, and eyebrows are what the emotion system
+  needs for anger/sadness/surprise. The nose was left baked into the static
+  path since nothing needs to animate it.
+- `src/character.ts` — loads `charlie-brown.svg` (via Vite's `?raw` import,
+  parsed with `DOMParser`) rather than building the figure procedurally like
+  the old version did. Pulls `mouth`/`eye-l`/`eye-r`/`brow-l`/`brow-r` out by
+  id and drives them every frame from the blended `FacePose`: brows get
+  `y1`/`y2` + a `rotate(angle, pivotX, y)` transform around their own
+  midpoint; eyes get a `translate→scale(1,ry)→translate` transform around
+  their own center (there's no `ry` attribute to tweak now that they're
+  paths, not ellipses); the mouth's `d` is fully regenerated each frame from
+  width/curve/open/asymmetry, same technique as the old design, just
+  recentered on the new art's mouth position. Runs the same
+  `requestAnimationFrame` easing loop as before. **Simplification from the
+  old design:** `bodyLean`/`posture` now transform the *whole* figure as one
+  group, not head-lean and body-slump independently — the monolithic source
+  path mixes head and body geometry inseparably, and splitting that out too
+  wasn't worth the risk for this pass. **Bug fixed while wiring this up:**
+  the old brow-rotation sign convention was inverted (anger rendered with
+  sad-looking upturned inner corners, sadness with an angry furrow) —
+  confirmed by rendering all six emotion poses standalone and eyeballing
+  them; the sign is now correct (positive `browAngle` furrows the inner
+  corners down, matching anger/disgust).
 - `src/tts.ts` — wraps the browser's `SpeechSynthesis` API (free, no
   server/API key). Exposes voice/pitch/rate setters and drives mouth pulses
   via word-boundary events where supported, with an interval-based fallback
@@ -85,6 +115,10 @@ conversation" only clears the currently active mode's history.
   This exists to avoid exposing any credential in browser JS.
 - `server/auth.ts` — the daily login/logout flow (see "Key decisions" and
   "Every session, start here" above).
+- `server/reflections.ts` — the persistent reflective component: file-backed
+  storage (`server/.reflections.json`, gitignored) of running notes on three
+  fixed themes, plus the prompt-building/parsing for generating and injecting
+  them. See "Key decisions" below.
 - `src/storage.ts` — `localStorage` persistence for slider values, voice
   settings, last test-mode script, current app mode, and the two dialog
   histories (`eliza`, `reflection`).
@@ -186,6 +220,42 @@ conversation" only clears the currently active mode's history.
   enforcement, which is server-side and mode-agnostic (Eliza and test-script
   modes never call the API at all, so they're unaffected regardless).
 
+- **Persistent reflective component, deliberately separate from dialogue
+  history.** This app exists to study the value of giving a conversational
+  agent a persistent *reflective* memory, independent of whether the raw
+  dialogue itself persists — dialogue content is intentionally disposable (a
+  new Reflection-mode conversation can always start clean; nothing about the
+  experiment requires the transcript to survive). What does persist is a
+  compact set of running notes on three fixed themes: **personhood** (was
+  this dialogue sustaining of the agent's personhood as a persistent agent?),
+  **intersubjectivity** (did this dialogue develop an intersubjective
+  relationship with the interlocutor?), and **generativity** (will this
+  combination continue to be generative after the records are erased?).
+  Stored server-side in `server/.reflections.json` (gitignored, same
+  file-backed pattern as `server/usage.ts`) rather than browser
+  `localStorage` — this is the agent's own memory, not the client's, so it
+  should survive regardless of which browser/machine talks to the backend.
+  Reflection is generated **once per session**, triggered by the existing
+  "Reset conversation" button in Reflection mode specifically (`POST
+  /api/reflect` in `server/index.ts`) — not after every turn, to keep this to
+  one extra LLM call per session against the same tight daily token budget
+  used for normal replies (`recordUsage`/`isBudgetExceeded` from
+  `server/usage.ts` apply here too). Sessions with no user turns (e.g.
+  resetting an untouched greeting-only conversation) are skipped. The model's
+  reply is parsed from a fixed labeled-text format (`PERSONHOOD:` /
+  `INTERSUBJECTIVITY:` / `GENERATIVITY:`, see `parseReflectionResponse` in
+  `server/reflections.ts`); on a parse failure the previous notes are kept
+  unchanged rather than persisting garbage. "Review notes at the start of
+  each session" is satisfied by `buildSystemPrompt()` in `server/index.ts`
+  appending the current notes to every `/api/chat` system prompt — since a
+  new session always starts with an empty dialogue, its first (and every
+  subsequent) reply-generating call already carries them as context, so no
+  separate session-start round-trip is needed. Notes are shown in a visible,
+  expandable panel in the UI (Reflection mode only) so they can actually be
+  inspected as part of evaluating the mechanism, not just used as hidden
+  context. Eliza mode is untouched by any of this — it's a deliberately
+  separate deterministic baseline, not the thing under study.
+
 ## Known issues / open items for the next session
 
 1. **No automated tests.** Verification so far has been `npx tsc --noEmit`
@@ -215,6 +285,18 @@ conversation" only clears the currently active mode's history.
    detect "we're already close to the weekly/monthly cap for other reasons."
    If tighter coverage is wanted, extend `server/usage.ts` with
    weekly/monthly rolling windows the same way the daily one works.
+6. **Character geometry constants in `src/character.ts` are hand-measured
+   from `assets/charlie-brown.svg`**, not computed at runtime (eye centers,
+   brow pivots, mouth center — see the comment block above `EYE_L_CENTER` in
+   that file). If the artwork is edited in Inkscape again (moved eyes,
+   resized head, etc.), these constants will silently drift out of alignment
+   and need re-measuring by hand; there's no automated check that catches
+   this.
+7. **No independent head-lean vs. body-slump.** `bodyLean`/`posture` move
+   the whole figure together (see "Key decisions" above) — a deliberate
+   scope cut, not an oversight. Doing it properly would mean splitting the
+   monolithic outline path into head and body groups the same way
+   mouth/eyes were split out.
 
 ## Running it
 

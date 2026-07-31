@@ -1,5 +1,6 @@
 import { blendPoses, zeroWeights, type EmotionWeights } from "./blend";
 import { NEUTRAL, type FacePose } from "./poses";
+import charlieSvgSource from "../assets/charlie-brown.svg?raw";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -20,99 +21,64 @@ const EASE = 0.08;
 // How quickly a speech mouth-pulse decays back toward zero, per frame.
 const SPEECH_DECAY = 0.82;
 
+// Geometry measured directly from assets/charlie-brown.svg (a 210x297
+// viewBox). The source art's eyes/mouth are otherwise-static shapes; these
+// are the anchor points animation is built around. The brows' x1/x2 are
+// authored directly on the <line> elements and never change — only y and
+// rotation do.
+const EYE_L_CENTER = { x: 89.6, y: 81.9 };
+const EYE_R_CENTER = { x: 124.6, y: 81.9 };
+const BROW_BASE_Y = 67;
+const BROW_L_PIVOT_X = 90;
+const BROW_R_PIVOT_X = 122;
+const MOUTH_CX = 109;
+const MOUTH_CY = 129;
+// Floor on the mouth's rendered thickness so its resting (closed) stroke
+// reads at the same visual weight as the brows/outline (~5 units) instead of
+// collapsing to a hairline — animation adds on top of this floor, it doesn't
+// replace it.
+const MOUTH_MIN_THICKNESS = 5;
+// Pivot for whole-figure lean/posture, roughly at the neck/collar.
+const FIGURE_PIVOT = { x: 106, y: 160 };
+
 export class Character {
   private weights: EmotionWeights = zeroWeights();
   private current: FacePose = { ...NEUTRAL };
   private speechIntensity = 0;
   private rafId: number | null = null;
 
-  private group: SVGGElement;
+  // The source SVG is one hand-traced silhouette path plus a handful of
+  // separately-extracted features (see charlie-brown.svg's header comment).
+  // There's no clean way to split "just the head" from "just the body" out
+  // of that single path, so lean/posture transform the whole figure as one
+  // group rather than head-only/body-only the way the old procedural
+  // drawing did.
+  private figureGroup: SVGGElement;
   private browL: SVGLineElement;
   private browR: SVGLineElement;
-  private eyeL: SVGEllipseElement;
-  private eyeR: SVGEllipseElement;
+  private eyeL: SVGGraphicsElement;
+  private eyeR: SVGGraphicsElement;
   private mouth: SVGPathElement;
-  private bodyGroup: SVGGElement;
 
   readonly svg: SVGSVGElement;
 
   constructor() {
-    this.svg = el("svg", {
-      viewBox: "0 0 200 240",
-      xmlns: SVG_NS,
-    });
+    const parsed = new DOMParser().parseFromString(charlieSvgSource, "image/svg+xml");
+    this.svg = document.importNode(parsed.documentElement, true) as unknown as SVGSVGElement;
 
-    this.group = el("g");
-    this.bodyGroup = el("g");
+    this.figureGroup = this.svg.getElementById("layer1") as unknown as SVGGElement;
+    this.browL = this.svg.getElementById("brow-l") as unknown as SVGLineElement;
+    this.browR = this.svg.getElementById("brow-r") as unknown as SVGLineElement;
+    this.eyeL = this.svg.getElementById("eye-l") as unknown as SVGGraphicsElement;
+    this.eyeR = this.svg.getElementById("eye-r") as unknown as SVGGraphicsElement;
 
-    // Body / shirt (classic Peanuts zigzag stripe on a round-collared shirt)
-    const shirt = el("path", {
-      d: "M 38 168 Q 30 205 32 234 L 168 234 Q 170 205 162 168 Q 131 190 100 168 Q 69 190 38 168 Z",
-      fill: "#ffffff",
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-      "stroke-linejoin": "round",
-    });
-    const zigzag = el("polyline", {
-      points: "45,196 60,208 75,196 90,208 105,196 120,208 135,196 150,208 155,196",
-      fill: "none",
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-      "stroke-linejoin": "round",
-      "stroke-linecap": "round",
-    });
-    this.bodyGroup.append(shirt, zigzag);
-
-    // Head
-    const head = el("circle", {
-      cx: 100,
-      cy: 100,
-      r: 66,
-      fill: "#ffffff",
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-    });
-
-    // Signature single curl
-    const curl = el("path", {
-      d: "M 108 38 C 116 24, 134 24, 126 42",
-      fill: "none",
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-      "stroke-linecap": "round",
-    });
-
-    this.browL = el("line", {
-      x1: 65,
-      x2: 91,
-      y1: 78,
-      y2: 78,
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-      "stroke-linecap": "round",
-    });
-    this.browR = el("line", {
-      x1: 109,
-      x2: 135,
-      y1: 78,
-      y2: 78,
-      stroke: "#1a1a1a",
-      "stroke-width": 3,
-      "stroke-linecap": "round",
-    });
-
-    this.eyeL = el("ellipse", { cx: 78, cy: 96, rx: 5, ry: 6, fill: "#1a1a1a" });
-    this.eyeR = el("ellipse", { cx: 122, cy: 96, rx: 5, ry: 6, fill: "#1a1a1a" });
-
-    this.mouth = el("path", {
-      fill: "#1a1a1a",
-      stroke: "#1a1a1a",
-      "stroke-width": 1,
-      "stroke-linejoin": "round",
-    });
-
-    this.group.append(head, curl, this.browL, this.browR, this.eyeL, this.eyeR, this.mouth);
-    this.svg.append(this.bodyGroup, this.group);
+    // The static mouth shape in the source art is a fixed neutral smile —
+    // swap it for a dynamically-redrawn path so it can flex for
+    // emotion (curve/width/asymmetry) and speech (mouthOpen + pulses),
+    // the same way the original procedural mouth worked.
+    const staticMouth = this.svg.getElementById("mouth") as unknown as SVGPathElement;
+    this.mouth = el("path", { fill: "#000000" });
+    staticMouth.replaceWith(this.mouth);
 
     this.applyPose(this.current);
     this.loop = this.loop.bind(this);
@@ -145,47 +111,47 @@ export class Character {
   }
 
   private applyPose(pose: FacePose): void {
-    const browLY = 78 + pose.browY;
-    const browRY = 78 + pose.browY;
-    this.browL.setAttribute("y1", String(browLY));
-    this.browL.setAttribute("y2", String(browLY));
-    this.browL.setAttribute("transform", `rotate(${-pose.browAngle} 78 ${browLY})`);
+    const browY = BROW_BASE_Y + pose.browY;
+    this.browL.setAttribute("y1", String(browY));
+    this.browL.setAttribute("y2", String(browY));
+    this.browL.setAttribute("transform", `rotate(${pose.browAngle} ${BROW_L_PIVOT_X} ${browY})`);
 
-    this.browR.setAttribute("y1", String(browRY));
-    this.browR.setAttribute("y2", String(browRY));
-    this.browR.setAttribute("transform", `rotate(${pose.browAngle} 122 ${browRY})`);
+    this.browR.setAttribute("y1", String(browY));
+    this.browR.setAttribute("y2", String(browY));
+    this.browR.setAttribute("transform", `rotate(${-pose.browAngle} ${BROW_R_PIVOT_X} ${browY})`);
 
-    const eyeRy = Math.max(1, 6 * pose.eyeOpen);
-    this.eyeL.setAttribute("ry", String(eyeRy));
-    this.eyeR.setAttribute("ry", String(eyeRy));
+    const eyeScale = Math.max(0.05, pose.eyeOpen);
+    this.eyeL.setAttribute("transform", eyeScaleTransform(EYE_L_CENTER, eyeScale));
+    this.eyeR.setAttribute("transform", eyeScaleTransform(EYE_R_CENTER, eyeScale));
 
     this.mouth.setAttribute("d", this.mouthPath(pose));
 
     const lean = pose.bodyLean;
     const posture = pose.posture;
-    this.group.setAttribute("transform", `rotate(${lean} 100 160)`);
-    this.bodyGroup.setAttribute(
+    this.figureGroup.setAttribute(
       "transform",
-      `translate(0 ${(1 - posture) * 40}) scale(1 ${posture})`,
+      `rotate(${lean} ${FIGURE_PIVOT.x} ${FIGURE_PIVOT.y}) translate(0 ${(1 - posture) * 40}) scale(1 ${posture})`,
     );
   }
 
   private mouthPath(pose: FacePose): string {
-    const cx = 100;
-    const cy = 136;
-    const halfWidth = 20 * pose.mouthWidth;
+    const halfWidth = 26 * pose.mouthWidth;
     const curveAmount = pose.mouthCurve * 12;
-    const openAmount = Math.min(1.4, pose.mouthOpen + this.speechIntensity) * 16;
+    const openAmount = MOUTH_MIN_THICKNESS + Math.min(1.4, pose.mouthOpen + this.speechIntensity) * 16;
     const asymL = -pose.mouthAsymmetry * 6;
     const asymR = pose.mouthAsymmetry * 6;
 
-    const leftX = cx - halfWidth;
-    const rightX = cx + halfWidth;
-    const leftY = cy + asymL;
-    const rightY = cy + asymR;
-    const controlTopY = cy + curveAmount - openAmount / 2;
-    const controlBottomY = cy + curveAmount + openAmount / 2;
+    const leftX = MOUTH_CX - halfWidth;
+    const rightX = MOUTH_CX + halfWidth;
+    const leftY = MOUTH_CY + asymL;
+    const rightY = MOUTH_CY + asymR;
+    const controlTopY = MOUTH_CY + curveAmount - openAmount / 2;
+    const controlBottomY = MOUTH_CY + curveAmount + openAmount / 2;
 
-    return `M ${leftX} ${leftY} Q ${cx} ${controlTopY} ${rightX} ${rightY} Q ${cx} ${controlBottomY} ${leftX} ${leftY} Z`;
+    return `M ${leftX} ${leftY} Q ${MOUTH_CX} ${controlTopY} ${rightX} ${rightY} Q ${MOUTH_CX} ${controlBottomY} ${leftX} ${leftY} Z`;
   }
+}
+
+function eyeScaleTransform(center: { x: number; y: number }, scale: number): string {
+  return `translate(${center.x} ${center.y}) scale(1 ${scale}) translate(${-center.x} ${-center.y})`;
 }

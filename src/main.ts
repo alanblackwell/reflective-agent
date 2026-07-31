@@ -5,7 +5,14 @@ import { loadState, saveState, type AppMode, type DialogModeName, type DialogTur
 import { EMOTION_NAMES, type EmotionName } from "./poses";
 import { zeroWeights } from "./blend";
 import { Eliza } from "./eliza";
-import { getAgentReply, fetchUsage, type UsageSnapshot } from "./agent";
+import {
+  getAgentReply,
+  fetchUsage,
+  fetchReflections,
+  reflectOnSession,
+  type UsageSnapshot,
+  type ReflectiveNotes,
+} from "./agent";
 
 const EMOTION_LABELS: Record<EmotionName, string> = {
   joy: "Joy",
@@ -93,6 +100,32 @@ if (!tts.isSupported()) {
 speakBtn.addEventListener("click", () => {
   tts.speak(scriptInput.value);
 });
+
+// --- Speech & animation toggle ---
+// Lets speech/mouth-sync be switched off entirely so dialog replies (and the
+// reflective-notes cycle they feed) can be iterated on quickly, without
+// waiting through the pre-speech pause and spoken-out-loud replies each time.
+
+const speechToggle = document.getElementById("speech-toggle") as HTMLInputElement;
+speechToggle.checked = state.speechEnabled;
+updateSpeechDependentControls();
+
+speechToggle.addEventListener("change", () => {
+  state.speechEnabled = speechToggle.checked;
+  saveState(state);
+  if (!state.speechEnabled) tts.stop();
+  updateSpeechDependentControls();
+});
+
+function updateSpeechDependentControls(): void {
+  const disabledBySpeechToggle = !state.speechEnabled;
+  speakBtn.disabled = disabledBySpeechToggle || !tts.isSupported();
+  speakBtn.title = disabledBySpeechToggle
+    ? "Speech & animation is turned off."
+    : !tts.isSupported()
+      ? "Speech synthesis is not supported in this browser."
+      : "";
+}
 
 stopBtn.addEventListener("click", () => {
   tts.stop();
@@ -203,6 +236,32 @@ function updateUsageDisplay(usage: UsageSnapshot | null): void {
     : "Say something...";
 }
 
+// --- Reflective notes panel ---
+// Displays the agent's persistent memory across Reflection-mode sessions
+// (server/reflections.ts) — running notes on three fixed themes, distinct
+// from dialogue history, which never needs to persist between sessions.
+
+const reflectionPanel = document.getElementById("reflection-notes-panel")!;
+const reflectionPersonhood = document.getElementById("reflection-personhood")!;
+const reflectionIntersubjectivity = document.getElementById("reflection-intersubjectivity")!;
+const reflectionGenerativity = document.getElementById("reflection-generativity")!;
+const reflectionStatus = document.getElementById("reflection-status")!;
+
+function renderReflections(notes: ReflectiveNotes | null): void {
+  if (!notes || notes.sessionCount === 0) {
+    reflectionPersonhood.textContent = "—";
+    reflectionIntersubjectivity.textContent = "—";
+    reflectionGenerativity.textContent = "—";
+    reflectionStatus.textContent = "No reflections yet — recorded at the end of your first session.";
+    return;
+  }
+  reflectionPersonhood.textContent = notes.personhood;
+  reflectionIntersubjectivity.textContent = notes.intersubjectivity;
+  reflectionGenerativity.textContent = notes.generativity;
+  const when = notes.lastUpdated ? new Date(notes.lastUpdated).toLocaleString() : "unknown";
+  reflectionStatus.textContent = `Session ${notes.sessionCount} — last updated ${when}`;
+}
+
 // --- Mode switching ---
 
 const appRoot = document.getElementById("app-root")!;
@@ -227,6 +286,7 @@ function applyMode(mode: AppMode): void {
   appRoot.classList.toggle("dialog-mode", isDialog);
   testModePanels.classList.toggle("hidden", mode !== "test");
   dialogModePanels.classList.toggle("hidden", !isDialog);
+  reflectionPanel.classList.toggle("hidden", mode !== "reflection");
   modeBadge.textContent = MODE_LABELS[mode];
   modeSelect.value = mode;
   // No slider UI in dialog modes, so the character reads as neutral there;
@@ -326,7 +386,7 @@ function showDialogMode(modeName: DialogModeName): void {
 function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
   if (pendingSpeakTimer !== null) window.clearTimeout(pendingSpeakTimer);
 
-  if (!tts.isSupported()) {
+  if (!tts.isSupported() || !state.speechEnabled) {
     // No speech to wait for — fall back to showing the reply immediately.
     addTurn(modeName, "agent", reply);
     return;
@@ -343,6 +403,7 @@ function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
 
 resetDialogBtn.addEventListener("click", () => {
   const modeName = state.mode as DialogModeName;
+  const historyToReflect = modeName === "reflection" ? [...state.dialogHistories.reflection] : null;
   dialogEpoch[modeName]++;
   if (pendingSpeakTimer !== null) {
     window.clearTimeout(pendingSpeakTimer);
@@ -358,6 +419,18 @@ resetDialogBtn.addEventListener("click", () => {
   saveState(state);
   seedIfEmpty(modeName);
   scrollDialogToBottom();
+
+  // Reflect on the session that just ended, in the background — the reset
+  // above is instant and never waits on this. Skips sessions with no user
+  // turns (e.g. immediately resetting a fresh greeting-only conversation).
+  if (historyToReflect && historyToReflect.some((turn) => turn.speaker === "user")) {
+    reflectionStatus.textContent = "Reflecting on last session…";
+    reflectOnSession(historyToReflect).then((result) => {
+      if (result.usage) updateUsageDisplay(result.usage);
+      if (result.notes) renderReflections(result.notes);
+      else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
+    });
+  }
 });
 
 chatForm.addEventListener("submit", (event) => {
@@ -385,4 +458,5 @@ chatForm.addEventListener("submit", (event) => {
 });
 
 fetchUsage().then(updateUsageDisplay);
+fetchReflections().then(renderReflections);
 applyMode(state.mode);

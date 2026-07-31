@@ -18,6 +18,7 @@ export interface PersistedState {
   pitch: number;
   rate: number;
   dialogHistories: Record<DialogModeName, DialogTurn[]>;
+  speechEnabled: boolean;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
@@ -33,6 +34,7 @@ function defaultState(): PersistedState {
     pitch: DEFAULT_PITCH,
     rate: DEFAULT_RATE,
     dialogHistories: { eliza: [], reflection: [] },
+    speechEnabled: true,
   };
 }
 
@@ -67,6 +69,7 @@ export function loadState(): PersistedState {
       pitch: typeof parsed.pitch === "number" ? parsed.pitch : DEFAULT_PITCH,
       rate: typeof parsed.rate === "number" ? parsed.rate : DEFAULT_RATE,
       dialogHistories: parseHistories(parsed.dialogHistories),
+      speechEnabled: typeof parsed.speechEnabled === "boolean" ? parsed.speechEnabled : true,
     };
   } catch {
     return defaultState();

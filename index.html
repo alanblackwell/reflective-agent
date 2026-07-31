@@ -10,6 +10,10 @@
     <main class="app" id="app-root">
       <div class="app-header">
         <h1>Reflective Agent <span class="mode-badge" id="mode-badge">reflection mode</span></h1>
+        <label class="speech-toggle" for="speech-toggle">
+          <input type="checkbox" id="speech-toggle" checked />
+          Speech &amp; animation
+        </label>
         <select id="mode-select">
           <option value="test">Test script</option>
           <option value="eliza">Eliza</option>
@@ -62,6 +66,23 @@
       </div>
 
       <div id="dialog-mode-panels" class="hidden">
+        <details id="reflection-notes-panel" class="panel hidden">
+          <summary>Reflective notes</summary>
+          <div class="reflection-note">
+            <span class="reflection-note-label">Personhood</span>
+            <p id="reflection-personhood"></p>
+          </div>
+          <div class="reflection-note">
+            <span class="reflection-note-label">Intersubjectivity</span>
+            <p id="reflection-intersubjectivity"></p>
+          </div>
+          <div class="reflection-note">
+            <span class="reflection-note-label">Generativity</span>
+            <p id="reflection-generativity"></p>
+          </div>
+          <div id="reflection-status" class="reflection-status"></div>
+        </details>
+
         <div class="dialog-toolbar">
           <button id="reset-dialog-btn" type="button">Reset conversation</button>
         </div>

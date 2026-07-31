@@ -1,9 +1,10 @@
 import "./style.css";
 import { Character } from "./character";
+import { EmotionWidget } from "./emotionWidget";
 import { TtsController } from "./tts";
 import { loadState, saveState, type AppMode, type DialogModeName, type DialogTurn } from "./storage";
 import { EMOTION_NAMES, type EmotionName } from "./poses";
-import { zeroWeights, type EmotionWeights } from "./blend";
+import { applyHeighten, zeroWeights, type EmotionWeights } from "./blend";
 import { scoreEmotions, applyEmotionDelta } from "./emotionLexicon";
 import { Eliza } from "./eliza";
 import {
@@ -29,7 +30,33 @@ const state = loadState();
 const stage = document.getElementById("character-stage")!;
 const character = new Character();
 stage.appendChild(character.svg);
-character.setEmotionWeights(state.sliders);
+
+const emotionWidget = new EmotionWidget({
+  onToggleCollapsed: (collapsed) => {
+    state.emotionWidgetCollapsed = collapsed;
+    saveState(state);
+  },
+});
+emotionWidget.setCollapsed(state.emotionWidgetCollapsed);
+stage.appendChild(emotionWidget.root);
+
+// Every place the character's pose is driven should also update the bar
+// widget, so the two never fall out of sync — route all of them through
+// this instead of calling character.setEmotionWeights() directly. Callers
+// always pass the *raw* weights for the active mode; the "heighten" amount
+// (see applyHeighten() in blend.ts) is applied here, once, so it affects
+// what's rendered/displayed without any caller needing to know about it.
+function setCharacterEmotion(weights: EmotionWeights): void {
+  const heightened = applyHeighten(weights, state.heighten);
+  character.setEmotionWeights(heightened);
+  emotionWidget.setWeights(heightened);
+}
+
+setCharacterEmotion(state.sliders);
+
+// Kept so the "React" toggle below can disable/re-enable every slider
+// input, not just visually (the grey overlay) but for real interaction too.
+const sliderInputs: HTMLInputElement[] = [];
 
 const slidersContainer = document.getElementById("sliders")!;
 for (const name of EMOTION_NAMES) {
@@ -46,6 +73,8 @@ for (const name of EMOTION_NAMES) {
   input.min = "0";
   input.max = "100";
   input.value = String(Math.round(state.sliders[name] * 100));
+  input.disabled = state.scriptReactEnabled;
+  sliderInputs.push(input);
 
   const output = document.createElement("output");
   output.textContent = input.value;
@@ -54,7 +83,7 @@ for (const name of EMOTION_NAMES) {
     const value = Number(input.value) / 100;
     state.sliders[name] = value;
     output.textContent = input.value;
-    character.setEmotionWeights(state.sliders);
+    setCharacterEmotion(state.sliders);
     saveState(state);
   });
 
@@ -62,11 +91,17 @@ for (const name of EMOTION_NAMES) {
   slidersContainer.appendChild(row);
 }
 
+const slidersOverlay = document.getElementById("sliders-overlay")!;
+slidersOverlay.classList.toggle("hidden", !state.scriptReactEnabled);
+
 const scriptInput = document.getElementById("script-input") as HTMLTextAreaElement;
 scriptInput.value = state.lastScript;
 scriptInput.addEventListener("input", () => {
   state.lastScript = scriptInput.value;
   saveState(state);
+  if (state.scriptReactEnabled && state.mode === "test") {
+    setCharacterEmotion(scoreEmotions(scriptInput.value));
+  }
 });
 
 const speakBtn = document.getElementById("speak-btn") as HTMLButtonElement;
@@ -116,6 +151,39 @@ speechToggle.addEventListener("change", () => {
   saveState(state);
   if (!state.speechEnabled) tts.stop();
   updateSpeechDependentControls();
+});
+
+// --- Heighten control ---
+// Global, mode-independent exaggeration of whichever emotion weights are
+// currently active (applyHeighten() in blend.ts) — applied inside
+// setCharacterEmotion(), so moving this slider just means re-rendering the
+// current mode's existing weights through it again.
+
+const heightenSlider = document.getElementById("heighten-slider") as HTMLInputElement;
+heightenSlider.value = String(Math.round(state.heighten * 100));
+
+heightenSlider.addEventListener("input", () => {
+  state.heighten = Number(heightenSlider.value) / 100;
+  saveState(state);
+  setCharacterEmotion(currentEmotionWeights(state.mode));
+});
+
+// --- Test mode "React" toggle ---
+// Swaps Test script mode's emotion source from the manual sliders (disabled
+// and greyed out via sliders-overlay while this is on) to a live score of
+// the script text itself, using the same local lexicon Eliza mode uses (see
+// currentEmotionWeights() above). Scoped to Test mode only — Eliza and
+// Reflection have their own independent emotion states, untouched by this.
+
+const reactToggle = document.getElementById("react-toggle") as HTMLInputElement;
+reactToggle.checked = state.scriptReactEnabled;
+
+reactToggle.addEventListener("change", () => {
+  state.scriptReactEnabled = reactToggle.checked;
+  saveState(state);
+  slidersOverlay.classList.toggle("hidden", !state.scriptReactEnabled);
+  for (const input of sliderInputs) input.disabled = state.scriptReactEnabled;
+  if (state.mode === "test") setCharacterEmotion(currentEmotionWeights("test"));
 });
 
 function updateSpeechDependentControls(): void {
@@ -264,10 +332,12 @@ function renderReflections(notes: ReflectiveNotes | null): void {
 }
 
 // --- Reflection-mode emotional state ---
-// Seeded once per session from the persistent reflection notes, then nudged
-// turn-by-turn from the sentiment of each exchange (src/emotionLexicon.ts) —
-// never recomputed from the full notes mid-session. Both steps are local
-// keyword scoring, no LLM call, so this costs zero extra tokens.
+// Seeded once per session from the persistent reflection notes via the local
+// lexicon (src/emotionLexicon.ts, no LLM call needed since there's no live
+// reply to score yet), then nudged turn-by-turn from the model's own
+// self-reported read on each exchange (server/emotionSelfReport.ts, falling
+// back to the local lexicon if the self-report tag is missing) — never
+// recomputed from the full notes mid-session.
 
 let latestNotes: ReflectiveNotes | null = null;
 
@@ -286,7 +356,7 @@ function reseedReflectionEmotionIfFresh(notes: ReflectiveNotes | null): void {
   if (!stillFresh) return;
   state.reflectionEmotion = deriveInitialEmotion(notes);
   saveState(state);
-  if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
+  if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
 }
 
 // --- Mode switching ---
@@ -308,12 +378,19 @@ function isDialogMode(mode: AppMode): mode is DialogModeName {
 }
 
 // Reflection mode's character emotion is a running state seeded from the
-// persistent reflection notes and nudged turn-by-turn (see
-// src/emotionLexicon.ts); Eliza stays neutral (deliberately untouched
-// baseline); Test mode keeps the manual sliders.
+// persistent reflection notes and nudged turn-by-turn from the model's own
+// self-report (server/emotionSelfReport.ts); Eliza mode is its own separate
+// running state, starting neutral each session and nudged turn-by-turn by
+// the local lexicon only (src/emotionLexicon.ts) — no LLM involved, kept
+// deliberately API-free per explicit user request; Test mode normally keeps
+// the manual sliders, but with "React" toggled on it's driven instead by
+// scoring the script text with that same local lexicon (a fresh score of
+// the whole script each time, not a decayed running state — there's no
+// notion of a "turn" here, just "this text scores as X").
 function currentEmotionWeights(mode: AppMode): EmotionWeights {
   if (mode === "reflection") return state.reflectionEmotion;
-  if (mode === "eliza") return zeroWeights();
+  if (mode === "eliza") return state.elizaEmotion;
+  if (mode === "test" && state.scriptReactEnabled) return scoreEmotions(scriptInput.value);
   return state.sliders;
 }
 
@@ -326,7 +403,7 @@ function applyMode(mode: AppMode): void {
   reflectionPanel.classList.toggle("hidden", mode !== "reflection");
   modeBadge.textContent = MODE_LABELS[mode];
   modeSelect.value = mode;
-  character.setEmotionWeights(currentEmotionWeights(mode));
+  setCharacterEmotion(currentEmotionWeights(mode));
   if (isDialog) showDialogMode(mode);
   updateUsageDisplay(lastUsage); // re-evaluate the chat-input gate for the new mode
 }
@@ -408,7 +485,7 @@ function seedIfEmpty(modeName: DialogModeName): void {
     // reseed on top of this as long as the user hasn't started talking yet.
     state.reflectionEmotion = deriveInitialEmotion(latestNotes);
     saveState(state);
-    if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
+    if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
   }
 }
 
@@ -458,7 +535,11 @@ resetDialogBtn.addEventListener("click", () => {
   pendingAgentMode = null;
   hideTypingIndicator();
   tts.stop();
-  if (modeName === "eliza") eliza.reset();
+  if (modeName === "eliza") {
+    eliza.reset();
+    state.elizaEmotion = zeroWeights();
+    if (state.mode === "eliza") setCharacterEmotion(state.elizaEmotion);
+  }
   state.dialogHistories[modeName] = [];
   dialogHistoryEl.innerHTML = "";
   saveState(state);
@@ -490,7 +571,15 @@ chatForm.addEventListener("submit", (event) => {
   addTurn(modeName, "user", text);
 
   if (modeName === "eliza") {
-    scheduleAgentSpeech("eliza", eliza.respond(text));
+    const reply = eliza.respond(text);
+    // Per-turn emotion nudge, local lexicon only (no LLM) — see
+    // src/emotionLexicon.ts and the "Eliza mode" comment on
+    // currentEmotionWeights() above for why this stays API-free.
+    const delta = scoreEmotions(`${text} ${reply}`);
+    state.elizaEmotion = applyEmotionDelta(state.elizaEmotion, delta);
+    saveState(state);
+    if (state.mode === "eliza") setCharacterEmotion(state.elizaEmotion);
+    scheduleAgentSpeech("eliza", reply);
     return;
   }
 
@@ -500,13 +589,14 @@ chatForm.addEventListener("submit", (event) => {
     hideTypingIndicator();
     updateUsageDisplay(result.usage);
     if (dialogEpoch.reflection !== epoch) return; // conversation was reset meanwhile
-    // Per-turn emotion nudge: score this exchange's sentiment locally (no
-    // LLM call) and fold it into the running state — never recomputed from
-    // the full reflection notes mid-session.
-    const delta = scoreEmotions(`${text} ${result.reply}`);
+    // Per-turn emotion nudge: prefer the model's own self-report (tagged onto
+    // its reply server-side, see server/emotionSelfReport.ts), falling back
+    // to the local lexicon score only if the tag is missing or malformed —
+    // never recomputed from the full reflection notes mid-session.
+    const delta = result.emotion ?? scoreEmotions(`${text} ${result.reply}`);
     state.reflectionEmotion = applyEmotionDelta(state.reflectionEmotion, delta);
     saveState(state);
-    if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
+    if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
     scheduleAgentSpeech("reflection", result.reply);
   });
 });

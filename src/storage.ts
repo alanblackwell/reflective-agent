@@ -21,9 +21,30 @@ export interface PersistedState {
   speechEnabled: boolean;
   // Reflection-mode-only emotional state: seeded from the persistent
   // reflection notes at the start of a session, then nudged turn-by-turn by
-  // a local sentiment score (see src/emotionLexicon.ts). Kept separate from
+  // the model's own self-report (see server/emotionSelfReport.ts, with a
+  // local-lexicon fallback in src/emotionLexicon.ts). Kept separate from
   // `sliders`, which is the manual test-mode UI control.
   reflectionEmotion: EmotionWeights;
+  // Eliza-mode-only emotional state: starts neutral each session and is
+  // nudged turn-by-turn by the local lexicon (src/emotionLexicon.ts) — no
+  // LLM involved, per explicit user request to keep Eliza mode's API-free
+  // design. Reset to neutral whenever Eliza's conversation is reset.
+  elizaEmotion: EmotionWeights;
+  // Whether the compact six-bar emotion readout (src/emotionWidget.ts) is
+  // minimized. Persisted so the user's preference survives a reload rather
+  // than the widget always reappearing.
+  emotionWidgetCollapsed: boolean;
+  // 0..1 "heighten" amount applied on top of whatever emotion weights are
+  // currently active, in every mode (see applyHeighten() in blend.ts).
+  // Models an exaggerated/altered emotional state, not a literal sentiment
+  // reading. 0 = untouched.
+  heighten: number;
+  // Test script mode's "React" toggle: when true, the character's emotion is
+  // driven by scoring `lastScript` with the local lexicon (see
+  // src/emotionLexicon.ts, the same zero-cost method Eliza mode uses)
+  // instead of the manual `sliders`, which are disabled (greyed out) while
+  // this is on.
+  scriptReactEnabled: boolean;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
@@ -41,6 +62,10 @@ function defaultState(): PersistedState {
     dialogHistories: { eliza: [], reflection: [] },
     speechEnabled: true,
     reflectionEmotion: zeroWeights(),
+    elizaEmotion: zeroWeights(),
+    emotionWidgetCollapsed: false,
+    heighten: 0,
+    scriptReactEnabled: false,
   };
 }
 
@@ -77,6 +102,10 @@ export function loadState(): PersistedState {
       dialogHistories: parseHistories(parsed.dialogHistories),
       speechEnabled: typeof parsed.speechEnabled === "boolean" ? parsed.speechEnabled : true,
       reflectionEmotion: { ...zeroWeights(), ...parsed.reflectionEmotion },
+      elizaEmotion: { ...zeroWeights(), ...parsed.elizaEmotion },
+      emotionWidgetCollapsed: typeof parsed.emotionWidgetCollapsed === "boolean" ? parsed.emotionWidgetCollapsed : false,
+      heighten: typeof parsed.heighten === "number" ? Math.max(0, Math.min(1, parsed.heighten)) : 0,
+      scriptReactEnabled: typeof parsed.scriptReactEnabled === "boolean" ? parsed.scriptReactEnabled : false,
     };
   } catch {
     return defaultState();

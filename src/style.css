@@ -120,6 +120,19 @@ h1 {
   cursor: pointer;
 }
 
+.heighten-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #555;
+  white-space: nowrap;
+}
+
+.heighten-control input[type="range"] {
+  width: 90px;
+}
+
 #mode-select {
   padding: 8px 14px;
   border-radius: 6px;
@@ -194,6 +207,7 @@ h1 {
 
 #character-stage {
   width: 100%;
+  position: relative;
   display: flex;
   justify-content: center;
 }
@@ -203,6 +217,96 @@ h1 {
      width follow so the figure isn't letterboxed inside a square box. */
   height: 260px;
   width: auto;
+}
+
+/* Compact six-bar emotion readout, anchored to the top-right corner of the
+   character stage. Deliberately minimal: no axis lines or numbers, just an
+   emoji per bar and a fill that grows upward from the baseline. */
+.emotion-widget {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+}
+
+.emotion-widget-panel {
+  position: relative;
+  display: flex;
+  background: #fff;
+  border: 1px solid #e5e2da;
+  border-radius: 10px;
+  padding: 16px 8px 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.emotion-widget-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 2px;
+}
+
+.emotion-widget-close:hover {
+  color: #666;
+}
+
+.emotion-widget-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.emotion-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 16px;
+}
+
+.emotion-bar-track {
+  width: 6px;
+  height: 40px;
+  border-radius: 3px;
+  background: #efece4;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+
+.emotion-bar-fill {
+  width: 100%;
+  height: 0%;
+  border-radius: 3px;
+  background: #b7791f;
+  transition: height 0.25s ease;
+}
+
+.emotion-bar-emoji {
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.emotion-widget-reopen {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #e5e2da;
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.emotion-widget-reopen:hover {
+  background: #f5f3ee;
 }
 
 .panel {
@@ -218,6 +322,47 @@ h1 {
   font-size: 0.95rem;
   font-weight: 600;
   color: #444;
+}
+
+.panel-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.panel-header-row h2 {
+  margin: 0;
+}
+
+.react-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #555;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.react-toggle input {
+  cursor: pointer;
+}
+
+/* Covers the whole sliders panel (title + all six sliders) while "React" is
+   on in Test script mode, to show the sliders are disabled — the character's
+   emotion is being driven by the script text instead (see main.ts). Sits on
+   a relatively-positioned .sliders-panel and matches its rounded corners. */
+.sliders-panel {
+  position: relative;
+}
+
+.sliders-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: rgba(120, 120, 120, 0.35);
 }
 
 .slider-row {

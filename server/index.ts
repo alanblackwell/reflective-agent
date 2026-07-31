@@ -4,6 +4,7 @@ import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
 import { DAILY_TOKEN_BUDGET, getUsage, isBudgetExceeded, recordUsage } from "./usage";
 import { dailyLogout, ensureDailyAuth, msUntilNextLocalMidnight } from "./auth";
+import { EMOTION_SELF_REPORT_INSTRUCTION, parseSelfReportedEmotion } from "./emotionSelfReport";
 import {
   REFLECTION_SYSTEM_PROMPT,
   buildReflectionUserMessage,
@@ -27,7 +28,7 @@ const BASE_SYSTEM_PROMPT =
 // every call so each new Reflection-mode session "reviews" them from its
 // very first reply, with no separate session-start round-trip needed.
 function buildSystemPrompt(): string {
-  return BASE_SYSTEM_PROMPT + formatReflectionsForSystemPrompt(getReflections());
+  return BASE_SYSTEM_PROMPT + EMOTION_SELF_REPORT_INSTRUCTION + formatReflectionsForSystemPrompt(getReflections());
 }
 
 interface ChatMessage {
@@ -84,7 +85,8 @@ app.post("/api/chat", async (req, res) => {
 
     const textBlock = response.content.find((block) => block.type === "text");
     const usage = recordUsage(response.usage.input_tokens, response.usage.output_tokens);
-    res.json({ reply: textBlock?.type === "text" ? textBlock.text : "", usage });
+    const { text: reply, emotion } = parseSelfReportedEmotion(textBlock?.type === "text" ? textBlock.text : "");
+    res.json({ reply, usage, emotion });
   } catch (err) {
     console.error("Anthropic API error:", err);
     res.status(502).json({ error: "Failed to reach the language model." });

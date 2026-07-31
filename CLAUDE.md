@@ -125,8 +125,22 @@ conversation" only clears the currently active mode's history.
   fixed themes, plus the prompt-building/parsing for generating and injecting
   them. See "Key decisions" below.
 - `src/emotionLexicon.ts` — crude, zero-cost sentiment scoring (keyword
-  counting against a small hand-picked lexicon per Ekman emotion) used to
-  drive Reflection mode's character emotion. See "Key decisions" below.
+  counting) used to drive both Eliza mode's and (as a fallback) Reflection
+  mode's character emotion. Combines a small hand-picked stem list for
+  casual/interjection words with the much larger `src/nrcEmotionLexiconData.ts`
+  dictionary. See "Key decisions" below.
+- `src/nrcEmotionLexiconData.ts` — auto-generated data file: ~3,460 words
+  filtered from the NRC Word-Emotion Association Lexicon (EmoLex) down to the
+  six Ekman emotions this app models. **Research/educational use only** — see
+  the license header in that file before any commercial use. See "Key
+  decisions" below.
+- `src/nrcSentimentFallback.ts` — auto-generated companion data file: ~2,530
+  more NRC words tagged only with a generic negative/positive sentiment (no
+  specific Ekman emotion) — e.g. "tired". Same source/license as the file
+  above. See "Key decisions" below.
+- `src/emotionWidget.ts` — the compact, collapsible six-bar emotion readout
+  shown over the character stage (emoji-labeled bars, no axis/numbers). See
+  "Key decisions" below.
 - `src/storage.ts` — `localStorage` persistence for slider values, voice
   settings, last test-mode script, current app mode, the two dialog
   histories (`eliza`, `reflection`), the speech/animation toggle
@@ -299,35 +313,196 @@ conversation" only clears the currently active mode's history.
   context. Eliza mode is untouched by any of this — it's a deliberately
   separate deterministic baseline, not the thing under study.
 
-- **Reflection mode's character emotion is driven by a local, keyword-based
-  sentiment score, not the LLM.** Two earlier options were considered:
-  asking the model to self-report emotion as a tagged suffix on its existing
-  reply (near-zero marginal tokens, rides on the call already happening), or
-  a pure local lexicon (zero tokens, cruder). The user explicitly chose the
-  lexicon option for being "crude but cheap." `src/emotionLexicon.ts`'s
-  `scoreEmotions()` counts hits against a small per-emotion keyword list
-  (no negation/sarcasm handling) and returns a bounded per-emotion delta
-  (capped at `MAX_DELTA`); `applyEmotionDelta()` folds a delta into the
-  current six weights with a decay factor (`DECAY = 0.7`) so a single
-  intense turn fades rather than sticking permanently. **Session start:**
-  `state.reflectionEmotion` is seeded once per Reflection-mode session (on
-  first load and after "Reset conversation") by scoring the concatenated
-  text of the three persistent reflection notes (`deriveInitialEmotion()` in
-  `main.ts`) — this happens twice in practice, once immediately with
-  whatever notes are already in memory and again when a fresher fetch
-  resolves (`reseedReflectionEmotionIfFresh()`), but the second pass is a
-  no-op once the user has sent a real message (checked via "does this
-  mode's history contain a user turn yet"), so it can't clobber accumulated
-  per-turn state. **Per turn:** after each Reflection-mode exchange, the
-  combined user+agent text for that turn is scored once and folded in via
-  `applyEmotionDelta()` — deliberately *not* re-derived from the full
-  reflection notes each turn, both to keep this incremental (per user
-  request) and because it's already zero-cost (no LLM call either way).
-  Eliza mode is untouched (stays neutral, per the existing "deliberately
-  separate baseline" rule); Test mode's manual sliders are untouched too —
-  `currentEmotionWeights()` in `main.ts` picks which of the three states
-  (`reflectionEmotion` / neutral / `sliders`) drives the character based on
-  the active mode.
+- **Reflection mode's per-turn character emotion is now the LLM's own
+  self-report, not local keyword scoring** — a deliberate change from the
+  original all-local design (see below for why, and for what's unchanged).
+  Two options were considered from the start: asking the model to
+  self-report emotion as a tagged suffix on its existing reply (near-zero
+  marginal tokens, rides on the call already happening), or a pure local
+  lexicon (zero tokens, cruder). The lexicon was chosen first for being
+  "crude but cheap," but after evaluating its output the user asked to
+  switch Reflection mode's per-turn nudge to the self-report option, while
+  explicitly keeping the local lexicon for Eliza mode (see the next bullet)
+  for consistency with Eliza's own zero-API-cost design.
+  `server/emotionSelfReport.ts`'s `EMOTION_SELF_REPORT_INSTRUCTION` is
+  appended to the Reflection-mode system prompt (`buildSystemPrompt()` in
+  `server/index.ts`), asking the model to end every reply with a fixed-format
+  tag — `[emotion: joy=0.00 sadness=0.00 anger=0.00 fear=0.00 surprise=0.00
+  disgust=0.00]` — read as *its own* rating of the exchange's emotional tone
+  (not a command about how to reply). `parseSelfReportedEmotion()` strips
+  this tag from the reply server-side (regex-anchored to the end of the
+  text) before it's ever shown or spoken, and returns the parsed weights
+  alongside `reply` in the `/api/chat` JSON body; a missing or malformed tag
+  yields `emotion: null` rather than blocking the reply. On the frontend,
+  `agent.ts`'s `parseEmotion()` loosely validates the incoming object
+  (clamps each numeric field to [0,1], treats an object with no numeric
+  fields as absent) before it reaches `main.ts`. **Cost:** this is not a
+  separate API call — it adds roughly 50-70 system-prompt tokens and 35-45
+  reply-suffix tokens per turn (~$0.0015 at `claude-opus-4-8` rates),
+  negligible next to the per-turn cost of resending the full conversation
+  history (see "Known issues" below). **Fallback:** in `main.ts`'s chat
+  submit handler, `result.emotion ?? scoreEmotions(...)` falls back to the
+  local lexicon (`src/emotionLexicon.ts`) only when the self-report is
+  absent, so a parse hiccup never freezes the character's expression.
+  `applyEmotionDelta()` still folds whatever delta (self-reported or
+  fallback-scored) into the running six weights with the same decay factor
+  (`DECAY = 0.7`) as before, so a single intense turn still fades rather
+  than sticking permanently — that folding/decay mechanism is unchanged by
+  this switch, only the source of the per-turn delta changed. **Session
+  start is also unchanged:** `state.reflectionEmotion` is still seeded once
+  per Reflection-mode session by scoring the concatenated text of the three
+  persistent reflection notes with the local lexicon
+  (`deriveInitialEmotion()` in `main.ts`, via `scoreEmotions()`) — there's no
+  live LLM reply to self-report on at seed time, so this step was never a
+  candidate for the self-report treatment. Eliza mode is untouched (stays
+  neutral, per the existing "deliberately separate baseline" rule — see the
+  next bullet for the larger-lexicon work planned for it); Test mode's
+  manual sliders are untouched too — `currentEmotionWeights()` in `main.ts`
+  picks which of the three states (`reflectionEmotion` / neutral /
+  `sliders`) drives the character based on the active mode.
+- **Eliza mode now has its own local, keyword-driven emotion, backed by a
+  much larger lexicon — the explicit trade the user chose instead of
+  Reflection mode's LLM self-report, "for consistency with its API-free
+  implementation."** Previously Eliza mode's character stayed neutral
+  always (deliberately untouched baseline, since the study was about
+  Reflection mode's mechanism). `state.elizaEmotion` (a new field in
+  `storage.ts`, parallel to `reflectionEmotion`) starts at `zeroWeights()`
+  each session and is reset to neutral whenever Eliza's conversation is
+  reset; the chat-submit handler in `main.ts` scores each
+  user-text-plus-Eliza-reply pair with `scoreEmotions()` and folds it in via
+  `applyEmotionDelta()` — the same decay-and-cap mechanism Reflection mode
+  uses, just with its own independent running state and its own local-only
+  data source (no LLM call, ever). `currentEmotionWeights()` was updated to
+  return `state.elizaEmotion` for Eliza mode instead of a hardcoded neutral.
+  **The lexicon itself was substantially enlarged to make this worthwhile:**
+  the original ~12-18-word-per-emotion hand-picked list is kept as
+  `SUPPLEMENTAL_LEXICON` in `emotionLexicon.ts` (it catches casual
+  interjections — "thanks", "wow", "ugh" — that a formal dictionary source
+  doesn't contain at all), but the primary source is now
+  `src/nrcEmotionLexiconData.ts`: ~3,460 words machine-filtered from the NRC
+  Word-Emotion Association Lexicon (EmoLex, Mohammad & Turney, 2013), a
+  ~14,182-word academic resource with manually-crowdsourced binary
+  associations across 8 emotions + 2 sentiments. The filter keeps only the
+  six categories this app models (anger, disgust, fear, joy, sadness,
+  surprise) and drops anticipation/trust/positive/negative, for which the
+  app has no slot. **License, disclosed the same way ELIZA's is above:**
+  EmoLex is copyright National Research Council Canada and licensed for
+  **research/educational use only** — not a blanket commercial license; the
+  header comment in `nrcEmotionLexiconData.ts` names the contact for a
+  commercial license and the paper to cite. Fine for this personal,
+  non-commercial project; would need addressing before any commercial
+  redistribution. Chosen over the alternatives considered (AFINN/VADER:
+  permissively licensed but single-valence, not per-discrete-emotion, so a
+  much weaker categorical fit; hand-expanding the original list further:
+  zero license risk but not a validated research resource) after the user
+  was presented with the trade-offs and picked NRC explicitly. **Lookup
+  design:** `NRC_LEXICON` is loaded once into a `Map` (`emotionLexicon.ts`);
+  `scoreEmotions()` tokenizes input text (`[a-z']+`) and looks up each token
+  directly, then — since NRC only lists base/lemma forms ("scare", not
+  "scared"; "cry", not "cries") — falls back to a crude single-pass suffix
+  strip (`ing`/`edly`/`ed`/`ies`/`es`/`s`) and re-checks, rather than pulling
+  in a real stemmer/lemmatizer dependency. **Multi-emotion words are
+  expected, not a bug:** NRC's crowdsourced annotations aren't mutually
+  exclusive, so a single word (e.g. "disgusting" → anger+disgust+fear,
+  "thrill" → joy+fear+surprise) commonly contributes to several emotions at
+  once — this can look surprising when eyeballing individual scores but
+  reflects genuine multi-label annotations in the source data, not a parsing
+  error.
+- **A negative/positive sentiment fallback (`src/nrcSentimentFallback.ts`)
+  recovers common words the main NRC lookup misses entirely**, added after
+  the user reported Eliza mode's expressed emotion felt absent too often.
+  Diagnosis (by simulating a real Eliza conversation): the per-turn score
+  already combined the user's text *and* Eliza's reply
+  (`scoreEmotions(\`${text} ${reply}\`)` in `main.ts` — that part was never
+  the problem), but plenty of everyday words like "tired" are in NRC only as
+  `negative=1` with all six specific Ekman columns at `0` — `nrcEmotionLexiconData.ts`'s
+  filter (keeps only words matching ≥1 of the six) drops these silently, so
+  they always scored as pure zero regardless of which texts were combined.
+  `nrcSentimentFallback.ts` captures exactly this set (~2,530 words, same
+  NRC source/license) as a `Record<string, "negative" | "positive">`.
+  `scoreEmotions()` in `emotionLexicon.ts` checks it **only** when the main
+  `NRC_LEXICON` lookup (including the suffix-stripping fallback) finds
+  nothing for a token — a `"negative"` tag nudges `sadness`, a `"positive"`
+  tag nudges `joy`, both at `FALLBACK_MATCH_WEIGHT` (half of
+  `PER_MATCH_WEIGHT`) since a generic sentiment tag is a cruder, less
+  specific signal than a direct per-emotion association. Confirmed by
+  re-running the same simulated conversation: "tired" now contributes
+  `sadness: 0.06` instead of nothing. **Deliberately narrow fix:** the user
+  was offered a second, separate diagnosis too — Eliza's largely mechanical
+  reflected replies can inject unrelated word-sense noise (e.g. "mother"
+  tagged `joy+sadness`, "deal" tagged `joy+surprise`, "kind of" triggering
+  `joy` via "kind") — and chose to fix only the recall gap (this bullet), not
+  to down-weight Eliza's reply relative to the user's text. That noise-source
+  is still there; revisit if it's still a problem after this fix.
+- **A compact, collapsible six-bar emotion widget (`src/emotionWidget.ts`)
+  is overlaid on the top-right corner of the character stage in every
+  mode**, added because the blended pose on the cartoon figure itself can be
+  hard to judge precisely by eye. By explicit design request: six small
+  bars, each labeled with an emoji instead of text (`joy`, `sadness`,
+  `anger`, `fear`, `surprise`, `disgust`, same fixed order as
+  `EMOTION_NAMES` everywhere else), each growing upward from a shared
+  baseline with **no axis line, tick marks, or numeric labels** — deliberately
+  minimal so it doesn't compete visually with the character. A single close
+  button in the panel's own upper-right corner collapses it to a small round
+  reopen tab; the collapsed/expanded state is persisted
+  (`state.emotionWidgetCollapsed` in `storage.ts`) so it doesn't reset on
+  reload. **Single source of truth:** every place in `main.ts` that used to
+  call `character.setEmotionWeights()` directly now goes through a new
+  `setCharacterEmotion()` wrapper (defined once, right after the character
+  and widget are created) that updates both the character pose and the
+  widget's bars from the same weights — this was a deliberate refactor of
+  all ~8 existing call sites specifically so the widget can never drift out
+  of sync with what the character is actually showing.
+- **A "heighten" slider (header control, all modes) exaggerates whichever
+  emotion weights are currently active, modeling an altered/heightened
+  emotional state — e.g. intoxication or acute mental illness distorting
+  expression — rather than adjusting the underlying sentiment reading
+  itself.** `applyHeighten()` in `src/blend.ts` computes the mean of the six
+  weights, then scales each one's deviation from that mean by
+  `Math.exp(HEIGHTEN_EXP_RATE * h)` where `h` is the 0..1 slider value
+  (`HEIGHTEN_EXP_RATE = 4`) — chosen deliberately *exponential*, per explicit
+  design request, so that the single emotion furthest from the mean
+  saturates to its 0/1 extreme quickly even at a moderate slider position,
+  while weights below the mean are pushed toward 0 and the result is always
+  clamped to `[0, 1]`. At `h = 0` the factor is exactly 1, so the transform
+  is a complete no-op (returns the input weights unchanged) — heighten
+  defaults to 0 and is opt-in. **This is purely a rendering-time transform,
+  not a change to any persisted or scored state:** `state.sliders` /
+  `state.reflectionEmotion` / `state.elizaEmotion` are never touched by it;
+  `setCharacterEmotion()` (see previous bullet) applies
+  `applyHeighten(weights, state.heighten)` once, right before handing
+  weights to the character and the widget, so every existing caller
+  automatically gets heighten applied without needing to know about it.
+  Moving the slider itself doesn't change any underlying weights either — it
+  just re-invokes `setCharacterEmotion(currentEmotionWeights(state.mode))`
+  so the current mode's existing weights are re-rendered through the new
+  heighten amount immediately. `state.heighten` is persisted (`storage.ts`)
+  like the other controls.
+- **Test script mode has a "React" toggle** (upper-right corner of the
+  Script panel) that swaps its emotion source from the six manual sliders to
+  a live score of the script text, reusing `scoreEmotions()` — the same
+  zero-cost local lexicon Eliza mode uses (see the Eliza-lexicon bullet
+  above) — rather than anything new. `currentEmotionWeights()` in `main.ts`
+  gained a `mode === "test" && state.scriptReactEnabled` branch that scores
+  `scriptInput.value` fresh on every call; this is deliberately **not** a
+  decayed running state like Eliza's/Reflection's `applyEmotionDelta()` fold
+  — there's no notion of a conversational "turn" for a single static script,
+  just "this text scores as X" recomputed each time. Re-scored on every
+  keystroke while React is on and Test mode is active (the `script-input`
+  listener), when the toggle itself is flipped, and implicitly on any mode
+  switch back into Test mode (`applyMode()` already calls
+  `setCharacterEmotion(currentEmotionWeights(mode))` unconditionally). While
+  on, the sliders are disabled two ways at once: a semi-transparent grey
+  `sliders-overlay` div absolutely positioned over the whole
+  `.sliders-panel` (title included) for the visual "this is disabled" cue
+  requested, **and** each slider `<input>`'s own `disabled` property is set
+  from a `sliderInputs` array collected when they're built — the overlay
+  alone would already block pointer events (positioned elements stack above
+  static ones with no `z-index` needed), but real `disabled` is the more
+  robust belt-and-suspenders choice (keyboard/tab focus, screen readers).
+  `state.scriptReactEnabled` is persisted like the other toggles. Eliza and
+  Reflection modes are untouched — this only ever changes what
+  `currentEmotionWeights("test")` returns.
 - **The reflection call is told the avatar's visible emotion at end of
   session**, so the model can consider how it implicitly presented itself
   visually, not just what it said. The reset handler in `main.ts` snapshots
@@ -388,10 +563,13 @@ conversation" only clears the currently active mode's history.
    mouth/eyes were split out.
 8. **The emotion lexicon is crude by design** (see "Key decisions" above) —
    plain keyword counting with no negation ("not happy" scores as happy) or
-   sarcasm handling, and a small hand-picked word list rather than a real
-   lexicon resource (e.g. NRC Emotion Lexicon). Accepted trade-off for zero
-   token cost; revisit if Reflection-mode's expressed emotion feels wrong
-   often enough to matter.
+   sarcasm handling. It's now backed by a real research resource (the NRC
+   Emotion Lexicon, ~3,460 words after filtering) plus a small hand-picked
+   supplemental list, rather than a purely hand-picked word list — but
+   still has no length normalization and only a crude single-suffix-strip
+   stemmer (misses many inflections a real lemmatizer would catch). Accepted
+   trade-off for zero token cost; revisit if Eliza- or Reflection-mode's
+   expressed emotion feels wrong often enough to matter.
 
 ## Running it
 

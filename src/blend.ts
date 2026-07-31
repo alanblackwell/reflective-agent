@@ -39,3 +39,30 @@ export function blendPoses(weights: EmotionWeights): FacePose {
   }
   return result;
 }
+
+// Exaggerates the six weights away from their mean, controlled by a 0..1
+// "heighten" amount — models a heightened/altered emotional state (e.g.
+// intoxication or acute mental illness distorting expression) rather than a
+// literal sentiment reading. Deviations from the mean are scaled by a factor
+// that grows *exponentially* with the heighten amount, so even a modest
+// slider position pushes whichever emotion is already most prominent toward
+// its extreme quickly, while the others get pushed toward zero; a heighten
+// of 0 leaves the weights completely untouched (scale factor of 1).
+const HEIGHTEN_EXP_RATE = 4;
+
+export function applyHeighten(weights: EmotionWeights, heighten: number): EmotionWeights {
+  const h = Math.max(0, Math.min(1, heighten));
+  if (h === 0) return weights;
+
+  let mean = 0;
+  for (const name of EMOTION_NAMES) mean += weights[name];
+  mean /= EMOTION_NAMES.length;
+
+  const factor = Math.exp(HEIGHTEN_EXP_RATE * h);
+  const result = {} as EmotionWeights;
+  for (const name of EMOTION_NAMES) {
+    const deviation = weights[name] - mean;
+    result[name] = Math.max(0, Math.min(1, mean + deviation * factor));
+  }
+  return result;
+}

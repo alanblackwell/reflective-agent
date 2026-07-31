@@ -1,5 +1,5 @@
 import type { DialogTurn } from "./storage";
-import type { EmotionWeights } from "./blend";
+import { zeroWeights, type EmotionWeights } from "./blend";
 
 const BASE_URL = "http://localhost:8787";
 const CHAT_URL = `${BASE_URL}/api/chat`;
@@ -26,6 +26,28 @@ export interface AgentReplyResult {
   reply: string;
   usage: UsageSnapshot | null;
   budgetExceeded: boolean;
+  // The model's self-reported read on this exchange's emotional tone (see
+  // server/emotionSelfReport.ts), parsed server-side from a tagged suffix on
+  // its reply. Null when absent or malformed — the caller falls back to the
+  // local lexicon (src/emotionLexicon.ts) in that case.
+  emotion: EmotionWeights | null;
+}
+
+// Loosely validated: any numeric fields are clamped into [0, 1] and merged
+// onto a zeroed base; a value with no numeric fields at all is treated as
+// absent rather than an all-zero emotion.
+function parseEmotion(value: unknown): EmotionWeights | null {
+  if (typeof value !== "object" || value === null) return null;
+  const obj = value as Record<string, unknown>;
+  const weights = zeroWeights();
+  let sawAny = false;
+  for (const name of Object.keys(weights) as (keyof EmotionWeights)[]) {
+    if (typeof obj[name] === "number") {
+      weights[name] = Math.min(1, Math.max(0, obj[name]));
+      sawAny = true;
+    }
+  }
+  return sawAny ? weights : null;
 }
 
 // The API requires the first message to be from the user and roles to
@@ -59,19 +81,26 @@ export async function getAgentReply(history: DialogTurn[]): Promise<AgentReplyRe
             : "Daily token budget reached — Reflection mode is paused until it resets.",
         usage: data.usage ?? null,
         budgetExceeded: true,
+        emotion: null,
       };
     }
     if (!res.ok) throw new Error(`Backend returned ${res.status}`);
     if (typeof data.reply !== "string" || !data.reply) {
       throw new Error("Backend returned an empty reply");
     }
-    return { reply: data.reply, usage: data.usage ?? null, budgetExceeded: false };
+    return {
+      reply: data.reply,
+      usage: data.usage ?? null,
+      budgetExceeded: false,
+      emotion: parseEmotion(data.emotion),
+    };
   } catch (err) {
     console.error("Agent backend request failed:", err);
     return {
       reply: "Sorry, I couldn't reach my brain just now — make sure the local agent server is running (npm run server).",
       usage: null,
       budgetExceeded: false,
+      emotion: null,
     };
   }
 }

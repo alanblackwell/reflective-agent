@@ -14,6 +14,10 @@
           <input type="checkbox" id="speech-toggle" checked />
           Speech &amp; animation
         </label>
+        <label class="heighten-control" for="heighten-slider" title="Exaggerates whichever emotion is currently most prominent, simulating a heightened/altered emotional state">
+          Heighten
+          <input type="range" id="heighten-slider" min="0" max="100" value="0" />
+        </label>
         <select id="mode-select">
           <option value="test">Test script</option>
           <option value="eliza">Eliza</option>
@@ -32,6 +36,7 @@
         <section class="panel sliders-panel">
           <h2>Emotion sliders</h2>
           <div id="sliders"></div>
+          <div id="sliders-overlay" class="sliders-overlay hidden"></div>
         </section>
 
         <section class="panel voice-panel">
@@ -53,7 +58,17 @@
         </section>
 
         <section class="panel script-panel">
-          <h2>Script</h2>
+          <div class="panel-header-row">
+            <h2>Script</h2>
+            <label
+              class="react-toggle"
+              for="react-toggle"
+              title="Drive the character's emotion from the script text instead of the sliders"
+            >
+              <input type="checkbox" id="react-toggle" />
+              React
+            </label>
+          </div>
           <textarea
             id="script-input"
             placeholder="Paste text here for the agent to read aloud..."

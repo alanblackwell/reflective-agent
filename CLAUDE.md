@@ -124,10 +124,14 @@ conversation" only clears the currently active mode's history.
   storage (`server/.reflections.json`, gitignored) of running notes on three
   fixed themes, plus the prompt-building/parsing for generating and injecting
   them. See "Key decisions" below.
+- `src/emotionLexicon.ts` — crude, zero-cost sentiment scoring (keyword
+  counting against a small hand-picked lexicon per Ekman emotion) used to
+  drive Reflection mode's character emotion. See "Key decisions" below.
 - `src/storage.ts` — `localStorage` persistence for slider values, voice
   settings, last test-mode script, current app mode, the two dialog
-  histories (`eliza`, `reflection`), and the speech/animation toggle
-  (`speechEnabled`, see "Key decisions" below).
+  histories (`eliza`, `reflection`), the speech/animation toggle
+  (`speechEnabled`, see "Key decisions" below), and Reflection mode's running
+  emotional state (`reflectionEmotion`).
 - `src/main.ts` — wires everything together; owns the mode dropdown and all
   DOM event handling, including the shared pause/typing-indicator/mouth-sync
   pipeline used by both dialog modes.
@@ -190,9 +194,34 @@ conversation" only clears the currently active mode's history.
   quota while experimenting with this app. `server/auth.ts`'s
   `ensureDailyAuth()` runs at server startup: it probes for a working
   credential via a free Models API metadata call (`client.models.retrieve`
-  — not billed), and if none is found, spawns `ant auth login`
-  *interactively* (`stdio: "inherit"`) so the browser-login prompt appears
-  right in whatever terminal `npm run server` was started from. A
+  — not billed), and if none is found, runs `ant auth login`. The login
+  URL is opened in Chrome specifically, not the OS default browser (Safari)
+  — the user's Anthropic session lives in Chrome — while still completing
+  automatically via `ant`'s local OAuth callback listener (no code to
+  copy/paste back).
+  **Two approaches were tried; the first was wrong.** The first attempt ran
+  `ant auth login --no-browser` (which prints the URL instead of opening a
+  browser itself) and opened the printed URL manually via `open -a`. That
+  broke more than it fixed: `--no-browser` doesn't just skip auto-opening —
+  it switches `ant` to a completely different OAuth completion mode, a
+  hosted `platform.claude.com` "copy this code" page, instead of the local
+  callback listener the default flow uses. Confirmed by testing: after that
+  change, the terminal asked for a manually-pasted code where it never had
+  before. The user asked for the automatic local-callback behavior to be
+  restored, so this was replaced with `makeBrowserShimEnv()` in
+  `server/auth.ts`: `ant` opens URLs via a plain `open` command lookup on
+  darwin (common for Go CLIs, e.g. `github.com/pkg/browser`), resolved
+  through `$PATH` — so a small generated shim script named `open`, in a
+  fresh temp dir prepended to `$PATH` for *only* the single `ant auth login`
+  child-process spawn (via a custom `env`, not touching this process's own
+  `process.env` or any system setting), intercepts that call: it redirects
+  `http(s)://` args to `open -a "Google Chrome"`, falling back to the real
+  `/usr/bin/open` (default browser) for anything else or if Chrome isn't
+  installed. The temp dir is cleaned up (`rmSync`) right after the login
+  child process exits. `ant auth login` itself is run with plain `stdio:
+  "inherit"` again (no output-scanning needed, since we're not parsing the
+  URL out by hand anymore) — `runInteractive()` just gained an optional
+  `env` parameter to support this. A
   `setTimeout` computed to the next local midnight
   (`msUntilNextLocalMidnight()`) then runs `ant auth logout` and calls
   `process.exit(0)` — printing a clear reminder to the shell first. The same
@@ -270,6 +299,52 @@ conversation" only clears the currently active mode's history.
   context. Eliza mode is untouched by any of this — it's a deliberately
   separate deterministic baseline, not the thing under study.
 
+- **Reflection mode's character emotion is driven by a local, keyword-based
+  sentiment score, not the LLM.** Two earlier options were considered:
+  asking the model to self-report emotion as a tagged suffix on its existing
+  reply (near-zero marginal tokens, rides on the call already happening), or
+  a pure local lexicon (zero tokens, cruder). The user explicitly chose the
+  lexicon option for being "crude but cheap." `src/emotionLexicon.ts`'s
+  `scoreEmotions()` counts hits against a small per-emotion keyword list
+  (no negation/sarcasm handling) and returns a bounded per-emotion delta
+  (capped at `MAX_DELTA`); `applyEmotionDelta()` folds a delta into the
+  current six weights with a decay factor (`DECAY = 0.7`) so a single
+  intense turn fades rather than sticking permanently. **Session start:**
+  `state.reflectionEmotion` is seeded once per Reflection-mode session (on
+  first load and after "Reset conversation") by scoring the concatenated
+  text of the three persistent reflection notes (`deriveInitialEmotion()` in
+  `main.ts`) — this happens twice in practice, once immediately with
+  whatever notes are already in memory and again when a fresher fetch
+  resolves (`reseedReflectionEmotionIfFresh()`), but the second pass is a
+  no-op once the user has sent a real message (checked via "does this
+  mode's history contain a user turn yet"), so it can't clobber accumulated
+  per-turn state. **Per turn:** after each Reflection-mode exchange, the
+  combined user+agent text for that turn is scored once and folded in via
+  `applyEmotionDelta()` — deliberately *not* re-derived from the full
+  reflection notes each turn, both to keep this incremental (per user
+  request) and because it's already zero-cost (no LLM call either way).
+  Eliza mode is untouched (stays neutral, per the existing "deliberately
+  separate baseline" rule); Test mode's manual sliders are untouched too —
+  `currentEmotionWeights()` in `main.ts` picks which of the three states
+  (`reflectionEmotion` / neutral / `sliders`) drives the character based on
+  the active mode.
+- **The reflection call is told the avatar's visible emotion at end of
+  session**, so the model can consider how it implicitly presented itself
+  visually, not just what it said. The reset handler in `main.ts` snapshots
+  `state.reflectionEmotion` (`emotionToReflect`) *before* `seedIfEmpty()`
+  re-seeds it for the new session — get this ordering wrong and you'd send
+  the new session's baseline instead of the just-ended session's actual
+  state. `reflectOnSession()` in `agent.ts` sends it as `emotion` in the
+  `/api/reflect` body; `buildReflectionUserMessage()` in
+  `server/reflections.ts` formats it as a plain `name=0.00` line per emotion
+  (`formatEmotionSnapshot`) and appends it to the transcript block.
+  `REFLECTION_SYSTEM_PROMPT` was extended with one sentence naming this
+  input and framing it as "a crude local sentiment estimate, not something
+  you generated directly, but part of how you were implicitly presented" —
+  no new output field was added to the PERSONHOOD/INTERSUBJECTIVITY/
+  GENERATIVITY format; it's additional context for those three, not a fourth
+  theme.
+
 ## Known issues / open items for the next session
 
 1. **No automated tests.** Verification so far has been `npx tsc --noEmit`
@@ -311,6 +386,12 @@ conversation" only clears the currently active mode's history.
    scope cut, not an oversight. Doing it properly would mean splitting the
    monolithic outline path into head and body groups the same way
    mouth/eyes were split out.
+8. **The emotion lexicon is crude by design** (see "Key decisions" above) —
+   plain keyword counting with no negation ("not happy" scores as happy) or
+   sarcasm handling, and a small hand-picked word list rather than a real
+   lexicon resource (e.g. NRC Emotion Lexicon). Accepted trade-off for zero
+   token cost; revisit if Reflection-mode's expressed emotion feels wrong
+   often enough to matter.
 
 ## Running it
 

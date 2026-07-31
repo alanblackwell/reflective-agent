@@ -19,6 +19,11 @@ export interface PersistedState {
   rate: number;
   dialogHistories: Record<DialogModeName, DialogTurn[]>;
   speechEnabled: boolean;
+  // Reflection-mode-only emotional state: seeded from the persistent
+  // reflection notes at the start of a session, then nudged turn-by-turn by
+  // a local sentiment score (see src/emotionLexicon.ts). Kept separate from
+  // `sliders`, which is the manual test-mode UI control.
+  reflectionEmotion: EmotionWeights;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
@@ -35,6 +40,7 @@ function defaultState(): PersistedState {
     rate: DEFAULT_RATE,
     dialogHistories: { eliza: [], reflection: [] },
     speechEnabled: true,
+    reflectionEmotion: zeroWeights(),
   };
 }
 
@@ -70,6 +76,7 @@ export function loadState(): PersistedState {
       rate: typeof parsed.rate === "number" ? parsed.rate : DEFAULT_RATE,
       dialogHistories: parseHistories(parsed.dialogHistories),
       speechEnabled: typeof parsed.speechEnabled === "boolean" ? parsed.speechEnabled : true,
+      reflectionEmotion: { ...zeroWeights(), ...parsed.reflectionEmotion },
     };
   } catch {
     return defaultState();

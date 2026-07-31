@@ -11,6 +11,7 @@ import {
   getReflections,
   parseReflectionResponse,
   saveReflections,
+  type EmotionSnapshot,
 } from "./reflections";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
@@ -38,6 +39,12 @@ function isChatMessage(value: unknown): value is ChatMessage {
   if (typeof value !== "object" || value === null) return false;
   const m = value as Record<string, unknown>;
   return (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
+}
+
+// Loosely validated: an object of numeric emotion weights, keys optional.
+function isEmotionSnapshot(value: unknown): value is EmotionSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.values(value as Record<string, unknown>).every((v) => typeof v === "number");
 }
 
 const client = new Anthropic();
@@ -100,6 +107,7 @@ app.post("/api/reflect", async (req, res) => {
   }
 
   const previousNotes = getReflections();
+  const emotion = isEmotionSnapshot(req.body?.emotion) ? req.body.emotion : null;
 
   // Reflection is best-effort — an exhausted budget must never block the
   // UI's reset action, so this responds 200 with the session skipped rather
@@ -114,7 +122,7 @@ app.post("/api/reflect", async (req, res) => {
       model: "claude-opus-4-8",
       max_tokens: 500,
       system: REFLECTION_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: buildReflectionUserMessage(messages, previousNotes) }],
+      messages: [{ role: "user", content: buildReflectionUserMessage(messages, previousNotes, emotion) }],
     });
 
     const textBlock = response.content.find((block) => block.type === "text");

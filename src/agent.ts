@@ -1,4 +1,5 @@
 import type { DialogTurn } from "./storage";
+import type { EmotionWeights } from "./blend";
 
 const BASE_URL = "http://localhost:8787";
 const CHAT_URL = `${BASE_URL}/api/chat`;
@@ -112,7 +113,14 @@ export async function fetchReflections(): Promise<ReflectiveNotes | null> {
   }
 }
 
-export async function reflectOnSession(history: DialogTurn[]): Promise<ReflectResult> {
+// `emotion` is the character's Ekman-weight state (src/emotionLexicon.ts) as
+// it stood at the end of the session being reflected on — sent along so the
+// agent can consider how it implicitly presented itself to the user
+// visually, not just what it said.
+export async function reflectOnSession(
+  history: DialogTurn[],
+  emotion: EmotionWeights | null = null,
+): Promise<ReflectResult> {
   const messages = toApiMessages(history);
   if (messages.length === 0) return { skipped: true, notes: null, usage: null };
 
@@ -120,7 +128,7 @@ export async function reflectOnSession(history: DialogTurn[]): Promise<ReflectRe
     const res = await fetch(REFLECT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, emotion }),
     });
     if (!res.ok) throw new Error(`Backend returned ${res.status}`);
     const data = await res.json();

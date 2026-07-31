@@ -69,7 +69,12 @@ export const REFLECTION_SYSTEM_PROMPT =
   "You are the persistent reflective component of a conversational agent. " +
   "A dialogue session you just had is below, along with your own notes from " +
   "before that session (your only memory of prior sessions — the dialogue " +
-  "itself is always erased). Update your notes in light of this session.\n\n" +
+  "itself is always erased). You'll also see the visible emotional " +
+  "expression (six Ekman weights) your animated avatar showed the " +
+  "interlocutor by the end of the session — a crude local sentiment " +
+  "estimate, not something you generated directly, but part of how you " +
+  "were implicitly presented to them. Update your notes in light of this " +
+  "session.\n\n" +
   "Reflect on exactly three themes, and reply with exactly this format, one " +
   "to three sentences per line, no other text:\n\n" +
   "PERSONHOOD: <Was the content of this dialogue sustaining of your " +
@@ -81,9 +86,30 @@ export const REFLECTION_SYSTEM_PROMPT =
   "Be concise and token-efficient — these notes persist and get resent as " +
   "context in every future session.";
 
+// The six Ekman weights driving the character's visible face/posture during
+// the session (see src/emotionLexicon.ts on the frontend — a crude, local,
+// zero-token sentiment score, not something the model generated itself).
+// Sent along at reflection time so the model can consider how it implicitly
+// presented itself to the user visually, not just what it said.
+const EMOTION_ORDER = ["joy", "sadness", "anger", "fear", "surprise", "disgust"] as const;
+export type EmotionSnapshot = Partial<Record<(typeof EMOTION_ORDER)[number], number>>;
+
+function formatEmotionSnapshot(emotion: EmotionSnapshot | null): string {
+  if (!emotion) return "";
+  const parts = EMOTION_ORDER.map((name) => `${name}=${(emotion[name] ?? 0).toFixed(2)}`);
+  return (
+    "\n\nYour visible expression (the character's blended face/posture, on a " +
+    "0-1 scale per emotion) as it stood at the end of this session: " +
+    parts.join(" ") +
+    ". This is a crude local sentiment estimate of the conversation, not " +
+    "something you chose directly — but it's what the interlocutor actually saw."
+  );
+}
+
 export function buildReflectionUserMessage(
   transcript: { role: "user" | "assistant"; content: string }[],
   previousNotes: ReflectiveNotes,
+  emotion: EmotionSnapshot | null = null,
 ): string {
   const previousBlock =
     previousNotes.sessionCount === 0
@@ -97,7 +123,7 @@ export function buildReflectionUserMessage(
     .map((m) => `${m.role === "user" ? "Interlocutor" : "You"}: ${m.content}`)
     .join("\n");
 
-  return `${previousBlock}\n\nThe dialogue session:\n${transcriptBlock}`;
+  return `${previousBlock}\n\nThe dialogue session:\n${transcriptBlock}${formatEmotionSnapshot(emotion)}`;
 }
 
 const LABELS = [

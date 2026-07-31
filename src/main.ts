@@ -3,7 +3,8 @@ import { Character } from "./character";
 import { TtsController } from "./tts";
 import { loadState, saveState, type AppMode, type DialogModeName, type DialogTurn } from "./storage";
 import { EMOTION_NAMES, type EmotionName } from "./poses";
-import { zeroWeights } from "./blend";
+import { zeroWeights, type EmotionWeights } from "./blend";
+import { scoreEmotions, applyEmotionDelta } from "./emotionLexicon";
 import { Eliza } from "./eliza";
 import {
   getAgentReply,
@@ -262,6 +263,32 @@ function renderReflections(notes: ReflectiveNotes | null): void {
   reflectionStatus.textContent = `Session ${notes.sessionCount} — last updated ${when}`;
 }
 
+// --- Reflection-mode emotional state ---
+// Seeded once per session from the persistent reflection notes, then nudged
+// turn-by-turn from the sentiment of each exchange (src/emotionLexicon.ts) —
+// never recomputed from the full notes mid-session. Both steps are local
+// keyword scoring, no LLM call, so this costs zero extra tokens.
+
+let latestNotes: ReflectiveNotes | null = null;
+
+function deriveInitialEmotion(notes: ReflectiveNotes | null): EmotionWeights {
+  if (!notes || notes.sessionCount === 0) return zeroWeights();
+  return scoreEmotions(`${notes.personhood} ${notes.intersubjectivity} ${notes.generativity}`);
+}
+
+// Re-seeds the reflection-mode emotion baseline from newly-fetched notes,
+// but only while the current reflection conversation still has no user
+// turns in it — once the user has actually started talking, per-turn deltas
+// own the state and a late-arriving notes fetch shouldn't clobber them.
+function reseedReflectionEmotionIfFresh(notes: ReflectiveNotes | null): void {
+  latestNotes = notes;
+  const stillFresh = state.dialogHistories.reflection.every((t) => t.speaker !== "user");
+  if (!stillFresh) return;
+  state.reflectionEmotion = deriveInitialEmotion(notes);
+  saveState(state);
+  if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
+}
+
 // --- Mode switching ---
 
 const appRoot = document.getElementById("app-root")!;
@@ -280,6 +307,16 @@ function isDialogMode(mode: AppMode): mode is DialogModeName {
   return mode === "eliza" || mode === "reflection";
 }
 
+// Reflection mode's character emotion is a running state seeded from the
+// persistent reflection notes and nudged turn-by-turn (see
+// src/emotionLexicon.ts); Eliza stays neutral (deliberately untouched
+// baseline); Test mode keeps the manual sliders.
+function currentEmotionWeights(mode: AppMode): EmotionWeights {
+  if (mode === "reflection") return state.reflectionEmotion;
+  if (mode === "eliza") return zeroWeights();
+  return state.sliders;
+}
+
 function applyMode(mode: AppMode): void {
   state.mode = mode;
   const isDialog = isDialogMode(mode);
@@ -289,9 +326,7 @@ function applyMode(mode: AppMode): void {
   reflectionPanel.classList.toggle("hidden", mode !== "reflection");
   modeBadge.textContent = MODE_LABELS[mode];
   modeSelect.value = mode;
-  // No slider UI in dialog modes, so the character reads as neutral there;
-  // switching back to test mode restores whatever the sliders are set to.
-  character.setEmotionWeights(isDialog ? zeroWeights() : state.sliders);
+  character.setEmotionWeights(currentEmotionWeights(mode));
   if (isDialog) showDialogMode(mode);
   updateUsageDisplay(lastUsage); // re-evaluate the chat-input gate for the new mode
 }
@@ -368,6 +403,12 @@ function seedIfEmpty(modeName: DialogModeName): void {
     addTurn("eliza", "agent", eliza.greeting());
   } else {
     addTurn("reflection", "agent", "Hi! What's on your mind?");
+    // Best-effort seed from whatever notes are already known; if the fetch
+    // at boot (or the reflect call after a reset) resolves later, it will
+    // reseed on top of this as long as the user hasn't started talking yet.
+    state.reflectionEmotion = deriveInitialEmotion(latestNotes);
+    saveState(state);
+    if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
   }
 }
 
@@ -404,6 +445,10 @@ function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
 resetDialogBtn.addEventListener("click", () => {
   const modeName = state.mode as DialogModeName;
   const historyToReflect = modeName === "reflection" ? [...state.dialogHistories.reflection] : null;
+  // Snapshot before seedIfEmpty() below re-seeds state.reflectionEmotion for
+  // the new session — this is the emotion as it stood at the end of the
+  // session being reflected on.
+  const emotionToReflect = modeName === "reflection" ? { ...state.reflectionEmotion } : null;
   dialogEpoch[modeName]++;
   if (pendingSpeakTimer !== null) {
     window.clearTimeout(pendingSpeakTimer);
@@ -425,10 +470,12 @@ resetDialogBtn.addEventListener("click", () => {
   // turns (e.g. immediately resetting a fresh greeting-only conversation).
   if (historyToReflect && historyToReflect.some((turn) => turn.speaker === "user")) {
     reflectionStatus.textContent = "Reflecting on last session…";
-    reflectOnSession(historyToReflect).then((result) => {
+    reflectOnSession(historyToReflect, emotionToReflect).then((result) => {
       if (result.usage) updateUsageDisplay(result.usage);
-      if (result.notes) renderReflections(result.notes);
-      else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
+      if (result.notes) {
+        renderReflections(result.notes);
+        reseedReflectionEmotionIfFresh(result.notes);
+      } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
     });
   }
 });
@@ -453,10 +500,20 @@ chatForm.addEventListener("submit", (event) => {
     hideTypingIndicator();
     updateUsageDisplay(result.usage);
     if (dialogEpoch.reflection !== epoch) return; // conversation was reset meanwhile
+    // Per-turn emotion nudge: score this exchange's sentiment locally (no
+    // LLM call) and fold it into the running state — never recomputed from
+    // the full reflection notes mid-session.
+    const delta = scoreEmotions(`${text} ${result.reply}`);
+    state.reflectionEmotion = applyEmotionDelta(state.reflectionEmotion, delta);
+    saveState(state);
+    if (state.mode === "reflection") character.setEmotionWeights(state.reflectionEmotion);
     scheduleAgentSpeech("reflection", result.reply);
   });
 });
 
 fetchUsage().then(updateUsageDisplay);
-fetchReflections().then(renderReflections);
+fetchReflections().then((notes) => {
+  renderReflections(notes);
+  reseedReflectionEmotionIfFresh(notes);
+});
 applyMode(state.mode);

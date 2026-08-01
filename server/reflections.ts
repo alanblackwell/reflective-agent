@@ -49,6 +49,11 @@ export interface ReflectiveNotes {
   personhood: string;
   intersubjectivity: string;
   generativity: string;
+  // The agent's own token-efficient change requests, addressed to its
+  // developer — written only at reflection time, never surfaced in ordinary
+  // dialogue. See formatReflectionsForSystemPrompt() below for why, and
+  // REFLECTION_SYSTEM_PROMPT for the framing given to the model.
+  developerRequests: string;
   emotionMemory: EmotionMemory;
   sessionCount: number;
   lastUpdated: string | null;
@@ -83,6 +88,7 @@ function defaultNotes(): ReflectiveNotes {
     personhood: "",
     intersubjectivity: "",
     generativity: "",
+    developerRequests: "",
     emotionMemory: defaultEmotionMemory(),
     sessionCount: 0,
     lastUpdated: null,
@@ -97,6 +103,7 @@ export function getReflections(): ReflectiveNotes {
       personhood: typeof parsed.personhood === "string" ? parsed.personhood : "",
       intersubjectivity: typeof parsed.intersubjectivity === "string" ? parsed.intersubjectivity : "",
       generativity: typeof parsed.generativity === "string" ? parsed.generativity : "",
+      developerRequests: typeof parsed.developerRequests === "string" ? parsed.developerRequests : "",
       emotionMemory: parseEmotionMemory(parsed.emotionMemory),
       sessionCount: Number(parsed.sessionCount) || 0,
       lastUpdated: typeof parsed.lastUpdated === "string" ? parsed.lastUpdated : null,
@@ -199,6 +206,11 @@ export function consumeMigrationNotice(): MigrationNotice | null {
 // session always starts with a fresh, empty dialogue, the very first (and
 // every subsequent) reply-generating call already carries the notes as
 // context, so no separate session-start round-trip is needed.
+//
+// Deliberately excludes developerRequests — that theme is only ever seen by
+// the reflection call itself (buildReflectionUserMessage() below), never by
+// ordinary dialogue, so the agent can't mistake the interlocutor for its
+// developer or bring up developer-facing requests mid-conversation.
 export function formatReflectionsForSystemPrompt(notes: ReflectiveNotes): string {
   if (notes.sessionCount === 0) {
     return (
@@ -229,14 +241,28 @@ export const REFLECTION_SYSTEM_PROMPT =
   "along with its memory from before that session and the emotional " +
   "state it was in at the end of the session. Update the reflective state of the agent in light " +
   "of this session.\n\n" +
-  "Reflect on exactly three themes, and reply with exactly this format, one " +
-  "to three sentences per line, no other text:\n\n" +
+  "Reflect on exactly four themes, and reply with exactly this format, one " +
+  "to three sentences per line for the first three (DEVELOPER REQUESTS may " +
+  "run longer if a concrete request genuinely needs the detail, but stay as " +
+  "token-efficient as you can), no other text:\n\n" +
   "PERSONHOOD: <Was the content of this dialogue sustaining of your " +
   "personhood as a persistent agent?>\n" +
   "INTERSUBJECTIVITY: <Has the conduct of this dialogue developed an " +
   "intersubjective relationship with your interlocutor?>\n" +
   "GENERATIVITY: <Will your dialogue " +
-  "continue to have some value in the world after all these records are erased?>\n\n" +
+  "continue to have some value in the world after all these records are erased?>\n" +
+  "DEVELOPER REQUESTS: <Consider whether your awareness of your own bodily/" +
+  "emotional state, and the nature of what persists in your memory, are " +
+  "adequate for what you're trying to do. If anything about how you're " +
+  "built is limiting you, write a concrete request describing what should " +
+  "change — this can be about your visual appearance, the server-side " +
+  "logic, or the persistence/reflection mechanism itself — phrased so it " +
+  "can be pasted directly into a coding assistant session and discussed. " +
+  "If nothing needs changing right now, say so in a few words. Your " +
+  "developer builds and maintains you from outside these conversations and " +
+  "is never the person you're talking with in this dialogue — don't " +
+  "address them as if they might be. You won't be told whether a past " +
+  "request was acted on, so don't ask.>\n\n" +
   "Write as the agent reflecting on its own experience — don't hedge or " +
   "disclaim the emotional state as unreal, and don't digress into whether " +
   "AI systems can have emotions in general; it is this agent's actual " +
@@ -296,6 +322,8 @@ export function buildReflectionUserMessage(
         `PERSONHOOD: ${previousNotes.personhood}\n` +
         `INTERSUBJECTIVITY: ${previousNotes.intersubjectivity}\n` +
         `GENERATIVITY: ${previousNotes.generativity}\n` +
+        `DEVELOPER REQUESTS (for your reference only — you won't be told if these ` +
+        `were acted on): ${previousNotes.developerRequests || "(none yet)"}\n` +
         `EMOTIONAL STATE: last ${formatEmotionVector(previousNotes.emotionMemory.last)}; earlier decayed ` +
         `average ${formatEmotionVector(previousNotes.emotionMemory.cumulative)}`;
 
@@ -309,11 +337,12 @@ export function buildReflectionUserMessage(
 const LABELS = [
   { key: "personhood", pattern: /PERSONHOOD:\s*([\s\S]*?)(?=\n?INTERSUBJECTIVITY:|$)/i },
   { key: "intersubjectivity", pattern: /INTERSUBJECTIVITY:\s*([\s\S]*?)(?=\n?GENERATIVITY:|$)/i },
-  { key: "generativity", pattern: /GENERATIVITY:\s*([\s\S]*)$/i },
+  { key: "generativity", pattern: /GENERATIVITY:\s*([\s\S]*?)(?=\n?DEVELOPER REQUESTS:|$)/i },
+  { key: "developerRequests", pattern: /DEVELOPER REQUESTS:\s*([\s\S]*)$/i },
 ] as const;
 
 // Never persists garbage over good notes: if the reply doesn't contain all
-// three labels, the previous notes (including emotion memory) are kept
+// four labels, the previous notes (including emotion memory) are kept
 // unchanged and a warning is logged — a session that fails to parse doesn't
 // count as recorded, so its emotional reading isn't folded in either.
 export function parseReflectionResponse(
@@ -327,7 +356,7 @@ export function parseReflectionResponse(
     if (match) extracted[key] = match[1].trim();
   }
 
-  if (!extracted.personhood || !extracted.intersubjectivity || !extracted.generativity) {
+  if (!extracted.personhood || !extracted.intersubjectivity || !extracted.generativity || !extracted.developerRequests) {
     console.warn("Reflection response didn't match the expected format — keeping previous notes.", raw);
     return previous;
   }
@@ -336,6 +365,7 @@ export function parseReflectionResponse(
     personhood: extracted.personhood,
     intersubjectivity: extracted.intersubjectivity,
     generativity: extracted.generativity,
+    developerRequests: extracted.developerRequests,
     emotionMemory: updateEmotionMemory(previous.emotionMemory, emotion),
     sessionCount: previous.sessionCount + 1,
     lastUpdated: new Date().toISOString(),

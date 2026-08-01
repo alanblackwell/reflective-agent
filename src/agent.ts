@@ -146,6 +146,10 @@ export interface ReflectiveNotes {
   personhood: string;
   intersubjectivity: string;
   generativity: string;
+  // The agent's own change requests, addressed to its developer — see
+  // server/reflections.ts. Never shown to the interlocutor mid-dialogue,
+  // only surfaced in the reflective-notes UI panel.
+  developerRequests: string;
   emotionMemory: EmotionMemory;
   sessionCount: number;
   lastUpdated: string | null;

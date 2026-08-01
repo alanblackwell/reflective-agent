@@ -546,6 +546,24 @@ textarea#script-input {
   margin-top: 12px;
 }
 
+.reflection-copy-btn {
+  margin-top: 4px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #ddd8cc;
+  background: #f5f3ee;
+  color: #555;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.reflection-copy-btn:hover {
+  background: #ece8de;
+}
+
 .reflection-note-label {
   font-size: 0.78rem;
   font-weight: 600;

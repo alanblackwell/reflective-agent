@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { ACTIVE_MODEL } from "./models";
 
 // A conservative daily ceiling on total (input + output) tokens spent via
 // this app's Reflection mode, so experimenting with it can't eat into a
@@ -10,10 +11,11 @@ export const DAILY_TOKEN_BUDGET = process.env.TOKEN_BUDGET_DAILY
   ? Number(process.env.TOKEN_BUDGET_DAILY)
   : 20000;
 
-// Rough blended claude-opus-4-8 pricing ($5 / $25 per MTok) — display only,
-// not what actually gets billed.
-const INPUT_COST_PER_TOKEN = 5 / 1_000_000;
-const OUTPUT_COST_PER_TOKEN = 25 / 1_000_000;
+// Derived from whichever model is actually active (server/models.ts) so this
+// estimate doesn't quietly go stale after a model swap — display only, not
+// what actually gets billed.
+const INPUT_COST_PER_TOKEN = ACTIVE_MODEL.inputCostPerMTok / 1_000_000;
+const OUTPUT_COST_PER_TOKEN = ACTIVE_MODEL.outputCostPerMTok / 1_000_000;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const USAGE_FILE = join(__dirname, ".usage.json");

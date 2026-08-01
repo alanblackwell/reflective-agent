@@ -116,8 +116,11 @@ conversation" only clears the currently active mode's history.
   reply text, with a friendly fallback string if the backend is unreachable.
 - `server/index.ts` — small Express server (run separately from the Vite
   dev server via `npm run server`) that proxies `POST /api/chat` to the
-  Claude API (`claude-opus-4-8`) using the official `@anthropic-ai/sdk`.
-  This exists to avoid exposing any credential in browser JS.
+  Claude API (model configurable, see `server/models.ts`) using the official
+  `@anthropic-ai/sdk`. This exists to avoid exposing any credential in
+  browser JS.
+- `server/models.ts` — the active Claude model, plus alternatives kept for
+  reference. See "Key decisions" below.
 - `server/auth.ts` — the daily login/logout flow (see "Key decisions" and
   "Every session, start here" above).
 - `server/reflections.ts` — the persistent reflective component: file-backed
@@ -196,12 +199,47 @@ conversation" only clears the currently active mode's history.
   (`server/`), never directly from the browser, to avoid shipping a
   credential to client JS. This is a separate process from the Vite dev
   server — both must be running (`npm run dev` and `npm run server`) for
-  Reflection mode to work. The backend uses `claude-opus-4-8` with a short
-  system prompt telling it replies are read aloud via TTS (keep responses
-  brief, no markdown). No streaming yet — a single non-streaming call per
-  turn. CORS is wide open (`cors()` with no origin restriction) since this
-  only ever runs on localhost for a single user; tighten this before any
-  kind of shared/networked deployment.
+  Reflection mode to work. The backend uses a short system prompt telling it
+  replies are read aloud via TTS (keep responses brief, no markdown). No
+  streaming yet — a single non-streaming call per turn. CORS is wide open
+  (`cors()` with no origin restriction) since this only ever runs on
+  localhost for a single user; tighten this before any kind of
+  shared/networked deployment.
+- **The active Claude model is a swappable constant, not hardcoded inline**
+  (`ACTIVE_MODEL` in `server/models.ts`, used by both `/api/chat` and
+  `/api/reflect`), after the user asked to try a cheaper model for a cost
+  experiment while keeping the alternatives on hand. `MODEL_OPTIONS` lists
+  `claude-haiku-4-5` ("cheapest"), `claude-sonnet-5` ("balanced"), and
+  `claude-opus-4-8` ("highest quality", the original default) — `ACTIVE_MODEL`
+  currently points at the first, Haiku 4.5, specifically to see how well a
+  much smaller/cheaper model holds up for this app's conversational and
+  reflective workload. `server/index.ts` logs the active model and its
+  rationale once at startup (`Using model claude-haiku-4-5 (cheapest)`) so
+  it's never silently unclear which one is running. Swap `ACTIVE_MODEL` to
+  try another entry from the list.
+- **Both API calls use prompt caching** (`cache_control: {type: "ephemeral"}`
+  breakpoints), added alongside the model-cost experiment above to attack the
+  same problem from the other side — token spend, not just per-token price.
+  `/api/chat`'s system prompt gets its own breakpoint (stable for the whole
+  session — it only changes when the persisted notes update between
+  sessions), and `withCacheBreakpoint()` in `server/index.ts` adds a second
+  one on the last message of the resent conversation history — the standard
+  multi-turn placement, so each turn only pays full price for what's
+  genuinely new and reads the rest back at a fraction of the cost. This
+  directly targets the "resends full history every turn" growth called out
+  in Known Issues below, without changing that design. `/api/reflect`'s
+  system prompt (`REFLECTION_SYSTEM_PROMPT`, a fixed constant, byte-identical
+  on every call ever made) is cached too; its user message deliberately isn't
+  — the transcript and notes differ every call, so there's no reusable
+  prefix to cache there. **Caveat worth knowing:** the minimum cacheable
+  prefix length varies by model — Haiku 4.5's is 4096 tokens, well above what
+  either prompt alone reaches and above what most of this app's short test
+  sessions accumulate, so caching may not visibly activate
+  (`cache_read_input_tokens: 0`) until either sessions grow longer or
+  `ACTIVE_MODEL` moves to a model with a lower threshold (512–1024 tokens on
+  the Opus 5 / Sonnet 5 / Opus 4.8 tier). Not a bug — check
+  `response.usage.cache_read_input_tokens` before assuming caching is
+  broken.
 - **No standing credential — a fresh `ant auth login` each calendar day,
   by explicit user request.** The Anthropic account this project uses is
   the same one used for Claude Code development elsewhere, and the user
@@ -269,8 +307,11 @@ conversation" only clears the currently active mode's history.
   `server/.usage.json` (gitignored) keyed by local calendar date, so it
   survives server restarts and resets automatically at local midnight with
   no scheduling logic — reading a stale-dated file just starts a fresh
-  count. Default budget is a deliberately conservative 20,000 tokens/day
-  (~$0.10–$0.50 depending on input/output mix); override via
+  count. Default budget is a deliberately conservative 20,000 tokens/day —
+  actual dollar cost depends on `ACTIVE_MODEL` (`server/models.ts`), whose
+  per-token rates now feed the displayed cost estimate directly rather than
+  a hardcoded pricing constant, so this figure moves with it instead of
+  silently going stale on a model swap; override the token count via
   `TOKEN_BUDGET_DAILY` in `.env`. The frontend shows a persistent progress
   bar + estimated cost in the header (`updateUsageDisplay()` in
   `src/main.ts`, fed by `GET /api/usage`) and disables the Reflection chat
@@ -393,6 +434,36 @@ conversation" only clears the currently active mode's history.
   manages restoring/forking old archives back into `current.json` by hand —
   the app has no UI for it, by design (per the user: "I'll manage all this
   myself with file naming").
+- **A fourth reflection theme, "developer requests," lets the agent ask its
+  actual developer (the user, working in Claude Code) to change anything
+  about the app** — client-side appearance, server-side logic, or the
+  persistence/reflection mechanism itself — prompted by having it consider
+  whether its own awareness of its bodily/emotional state and the nature of
+  its persistent memory are adequate. `ReflectiveNotes.developerRequests` in
+  `server/reflections.ts` is a plain additive string field (empty default,
+  **no `CURRENT_SCHEMA_VERSION` bump** — this follows that constant's own
+  documented rule, since old records without it just get the default, no
+  reinterpretation risk). `REFLECTION_SYSTEM_PROMPT` gained a fourth labeled
+  line, `DEVELOPER REQUESTS:`, asking for something concrete and phrased so
+  it can be pasted straight into a coding-assistant session; `LABELS` and
+  `parseReflectionResponse()` extended the same way the third theme already
+  worked, just requiring all four labels now instead of three. **Deliberately
+  never appears in the ordinary `/api/chat` system prompt** — only
+  `buildReflectionUserMessage()` (the `/api/reflect` call itself) includes
+  the previous request as context, so the agent can build on or drop it
+  reflection-to-reflection. This is the load-bearing design constraint: if
+  developer requests leaked into ordinary dialogue, the agent could end up
+  addressing the interlocutor as if *they* were its developer, which the
+  user explicitly ruled out — "the developer" is always framed in the prompt
+  as a separate party the agent never directly talks to. The prompt also
+  tells the model explicitly that it won't be told whether a past request
+  was acted on, so it doesn't awkwardly ask. Shown in the reflective-notes UI
+  panel like the other three themes, plus a one-off "Copy" button
+  (`#reflection-developer-requests-copy` in `main.ts`) — a low-cost,
+  directly-on-point addition given the whole point is pasting this straight
+  into a Claude Code session. Composes for free with the "terminate"
+  archiving feature above: `archiveCurrentReflections()` copies whatever's
+  on disk, so developer requests end up in every archive automatically.
 
 - **Reflection mode's per-turn character emotion is now the LLM's own
   self-report, not local keyword scoring** — a deliberate change from the
@@ -419,9 +490,10 @@ conversation" only clears the currently active mode's history.
   (clamps each numeric field to [0,1], treats an object with no numeric
   fields as absent) before it reaches `main.ts`. **Cost:** this is not a
   separate API call — it adds roughly 50-70 system-prompt tokens and 35-45
-  reply-suffix tokens per turn (~$0.0015 at `claude-opus-4-8` rates),
-  negligible next to the per-turn cost of resending the full conversation
-  history (see "Known issues" below). **Fallback:** in `main.ts`'s chat
+  reply-suffix tokens per turn (a fraction of a cent at any of the models in
+  `server/models.ts`), negligible next to the per-turn cost of resending the
+  full conversation history (see "Known issues" below). **Fallback:** in
+  `main.ts`'s chat
   submit handler, `result.emotion ?? scoreEmotions(...)` falls back to the
   local lexicon (`src/emotionLexicon.ts`) only when the self-report is
   absent, so a parse hiccup never freezes the character's expression.

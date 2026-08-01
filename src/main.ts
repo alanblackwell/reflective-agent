@@ -340,6 +340,10 @@ const reflectionPersonhood = document.getElementById("reflection-personhood")!;
 const reflectionIntersubjectivity = document.getElementById("reflection-intersubjectivity")!;
 const reflectionGenerativity = document.getElementById("reflection-generativity")!;
 const reflectionEmotionEl = document.getElementById("reflection-emotion")!;
+const reflectionDeveloperRequests = document.getElementById("reflection-developer-requests")!;
+const reflectionDeveloperRequestsCopyBtn = document.getElementById(
+  "reflection-developer-requests-copy",
+) as HTMLButtonElement;
 const reflectionStatus = document.getElementById("reflection-status")!;
 const reflectionMigrationNotice = document.getElementById("reflection-migration-notice")!;
 const reflectionMigrationNoticeText = document.getElementById("reflection-migration-notice-text")!;
@@ -379,12 +383,14 @@ function renderReflections(notes: ReflectiveNotes | null): void {
     reflectionIntersubjectivity.textContent = "—";
     reflectionGenerativity.textContent = "—";
     reflectionEmotionEl.textContent = "—";
+    reflectionDeveloperRequests.textContent = "—";
     reflectionStatus.textContent = "No reflections yet — recorded at the end of your first session.";
     return;
   }
   reflectionPersonhood.textContent = notes.personhood;
   reflectionIntersubjectivity.textContent = notes.intersubjectivity;
   reflectionGenerativity.textContent = notes.generativity;
+  reflectionDeveloperRequests.textContent = notes.developerRequests || "—";
   // Defensive: a notes object from a stale/legacy server (or a hand-edited
   // .reflections.json) may not have emotionMemory at all — don't let that
   // throw and abort the rest of this render (in particular the status line
@@ -396,6 +402,20 @@ function renderReflections(notes: ReflectiveNotes | null): void {
   const when = notes.lastUpdated ? new Date(notes.lastUpdated).toLocaleString() : "unknown";
   reflectionStatus.textContent = `Session ${notes.sessionCount} — last updated ${when}`;
 }
+
+// Directly serves the stated purpose of this field: a one-click way to get
+// the agent's developer-request text onto the clipboard for pasting into a
+// Claude Code session.
+reflectionDeveloperRequestsCopyBtn.addEventListener("click", () => {
+  const text = reflectionDeveloperRequests.textContent ?? "";
+  navigator.clipboard.writeText(text).then(() => {
+    const original = reflectionDeveloperRequestsCopyBtn.textContent;
+    reflectionDeveloperRequestsCopyBtn.textContent = "Copied!";
+    window.setTimeout(() => {
+      reflectionDeveloperRequestsCopyBtn.textContent = original;
+    }, 1500);
+  });
+});
 
 // --- Reflection-mode emotional state ---
 // Seeded once per session from the persistent reflection notes via the local

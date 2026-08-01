@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { DAILY_TOKEN_BUDGET, getUsage, isBudgetExceeded, recordUsage, resetUsage } from "./usage";
 import { dailyLogout, ensureDailyAuth, msUntilNextLocalMidnight } from "./auth";
 import { EMOTION_SELF_REPORT_INSTRUCTION, parseSelfReportedEmotion } from "./emotionSelfReport";
+import { ACTIVE_MODEL } from "./models";
 import {
   REFLECTION_SYSTEM_PROMPT,
   archiveCurrentReflections,
@@ -46,6 +47,25 @@ function isChatMessage(value: unknown): value is ChatMessage {
   return (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
 }
 
+// Reflection mode resends the full dialog history on every /api/chat call
+// (see CLAUDE.md's "Known issues" — no compaction yet), so a long session's
+// per-turn cost otherwise grows with the square of its length. Caching the
+// prefix through the most-recently-appended turn means each new call only
+// pays full price for what's actually new — everything before it is read
+// back at a fraction of the cost, once a request's prefix clears the active
+// model's minimum cacheable length (see server/models.ts). Standard
+// multi-turn placement: https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+function withCacheBreakpoint(messages: ChatMessage[]) {
+  return messages.map((m, i) =>
+    i === messages.length - 1
+      ? {
+          role: m.role,
+          content: [{ type: "text" as const, text: m.content, cache_control: { type: "ephemeral" as const } }],
+        }
+      : { role: m.role, content: m.content },
+  );
+}
+
 // Loosely validated: an object of numeric emotion weights, keys optional.
 function isEmotionSnapshot(value: unknown): value is EmotionSnapshot {
   if (typeof value !== "object" || value === null) return false;
@@ -85,10 +105,14 @@ app.post("/api/chat", async (req, res) => {
 
   try {
     const response = await client.messages.create({
-      model: "claude-opus-4-8",
+      model: ACTIVE_MODEL.id,
       max_tokens: 1024,
-      system: buildSystemPrompt(),
-      messages,
+      // The system prompt is stable for the whole Reflection-mode session
+      // (it only changes when the persisted notes are updated between
+      // sessions), so it's cacheable on its own breakpoint alongside the
+      // conversation-history one in withCacheBreakpoint() below.
+      system: [{ type: "text", text: buildSystemPrompt(), cache_control: { type: "ephemeral" } }],
+      messages: withCacheBreakpoint(messages),
     });
 
     const textBlock = response.content.find((block) => block.type === "text");
@@ -135,9 +159,13 @@ app.post("/api/reflect", async (req, res) => {
 
   try {
     const response = await client.messages.create({
-      model: "claude-opus-4-8",
+      model: ACTIVE_MODEL.id,
       max_tokens: 500,
-      system: REFLECTION_SYSTEM_PROMPT,
+      // REFLECTION_SYSTEM_PROMPT is a fixed constant, byte-identical on
+      // every call, so it's cacheable across every reflection ever run — the
+      // user message isn't (transcript + notes differ every time, so there's
+      // no reusable prefix there to cache; see prompt-caching guidance).
+      system: [{ type: "text", text: REFLECTION_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: buildReflectionUserMessage(messages, previousNotes, emotion) }],
     });
 
@@ -188,6 +216,7 @@ async function main(): Promise<void> {
   scheduleDailyShutdown();
   app.listen(PORT, () => {
     console.log(`Agent backend listening on http://localhost:${PORT}`);
+    console.log(`Using model ${ACTIVE_MODEL.id} (${ACTIVE_MODEL.rationale})`);
   });
 }
 

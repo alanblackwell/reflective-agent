@@ -1,4 +1,4 @@
-import { blendPoses, zeroWeights, type EmotionWeights } from "./blend";
+import { applyTheatricalDistortion, zeroWeights, type EmotionWeights } from "./blend";
 import { NEUTRAL, type FacePose } from "./poses";
 import charlieSvgSource from "../assets/charlie-brown.svg?raw";
 
@@ -99,7 +99,7 @@ export class Character {
   }
 
   private loop(): void {
-    const target = blendPoses(this.weights);
+    const target = applyTheatricalDistortion(this.weights);
     for (const key of Object.keys(this.current) as (keyof FacePose)[]) {
       this.current[key] += (target[key] - this.current[key]) * EASE;
     }

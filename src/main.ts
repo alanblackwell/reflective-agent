@@ -338,7 +338,7 @@ usageResetBtn.addEventListener("click", async () => {
 const reflectionPanel = document.getElementById("reflection-notes-panel")!;
 const reflectionPersonhood = document.getElementById("reflection-personhood")!;
 const reflectionIntersubjectivity = document.getElementById("reflection-intersubjectivity")!;
-const reflectionGenerativity = document.getElementById("reflection-generativity")!;
+const reflectionLegacy = document.getElementById("reflection-legacy")!;
 const reflectionEmotionEl = document.getElementById("reflection-emotion")!;
 const reflectionDeveloperRequests = document.getElementById("reflection-developer-requests")!;
 const reflectionDeveloperRequestsCopyBtn = document.getElementById(
@@ -381,7 +381,7 @@ function renderReflections(notes: ReflectiveNotes | null): void {
   if (!notes || notes.sessionCount === 0) {
     reflectionPersonhood.textContent = "—";
     reflectionIntersubjectivity.textContent = "—";
-    reflectionGenerativity.textContent = "—";
+    reflectionLegacy.textContent = "—";
     reflectionEmotionEl.textContent = "—";
     reflectionDeveloperRequests.textContent = "—";
     reflectionStatus.textContent = "No reflections yet — recorded at the end of your first session.";
@@ -389,7 +389,7 @@ function renderReflections(notes: ReflectiveNotes | null): void {
   }
   reflectionPersonhood.textContent = notes.personhood;
   reflectionIntersubjectivity.textContent = notes.intersubjectivity;
-  reflectionGenerativity.textContent = notes.generativity;
+  reflectionLegacy.textContent = notes.legacy;
   reflectionDeveloperRequests.textContent = notes.developerRequests || "—";
   // Defensive: a notes object from a stale/legacy server (or a hand-edited
   // .reflections.json) may not have emotionMemory at all — don't let that
@@ -429,7 +429,7 @@ let latestNotes: ReflectiveNotes | null = null;
 
 function deriveInitialEmotion(notes: ReflectiveNotes | null): EmotionWeights {
   if (!notes || notes.sessionCount === 0) return zeroWeights();
-  return scoreEmotions(`${notes.personhood} ${notes.intersubjectivity} ${notes.generativity}`);
+  return scoreEmotions(`${notes.personhood} ${notes.intersubjectivity} ${notes.legacy}`);
 }
 
 // Re-seeds the reflection-mode emotion baseline from newly-fetched notes,

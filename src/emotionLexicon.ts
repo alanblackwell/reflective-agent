@@ -44,6 +44,38 @@ const PER_MATCH_WEIGHT = 0.12;
 const FALLBACK_MATCH_WEIGHT = PER_MATCH_WEIGHT / 2;
 const MAX_DELTA = 0.4;
 
+// Keyword counting is crude enough that two or more emotions frequently land
+// on the exact same score (both 0, or both matching one keyword each) — and
+// applyHeighten() in blend.ts scales each weight's deviation from the mean,
+// so values that start out tied stay tied no matter how much heighten is
+// applied afterward. breakTies() below fixes this at the source, before
+// heighten (or anything else) ever sees the values.
+const TIE_BREAK_SD = 0.02; // 2% of the full 0-1 scale
+
+// Box-Muller transform — no built-in Gaussian RNG in JS.
+function gaussianSample(sd: number): number {
+  const u1 = Math.random() || Number.EPSILON; // avoid log(0)
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * sd;
+}
+
+// Nudges every value that shares its score with at least one other value by
+// an independent Gaussian sample, so a tie in the raw analysis doesn't
+// silently survive as a tie all the way through to the rendered pose. Values
+// that are already unique among the six are left untouched.
+function breakTies(weights: EmotionWeights): EmotionWeights {
+  const counts = new Map<number, number>();
+  for (const name of EMOTION_NAMES) counts.set(weights[name], (counts.get(weights[name]) ?? 0) + 1);
+
+  const result = { ...weights };
+  for (const name of EMOTION_NAMES) {
+    if ((counts.get(weights[name]) ?? 0) > 1) {
+      result[name] = Math.min(1, Math.max(0, weights[name] + gaussianSample(TIE_BREAK_SD)));
+    }
+  }
+  return result;
+}
+
 const NRC_MAP = new Map(Object.entries(NRC_LEXICON));
 const NRC_SENTIMENT_MAP = new Map(Object.entries(NRC_SENTIMENT_FALLBACK));
 
@@ -97,7 +129,7 @@ export function scoreEmotions(text: string): EmotionWeights {
   }
 
   for (const name of EMOTION_NAMES) result[name] = Math.min(MAX_DELTA, result[name]);
-  return result;
+  return breakTies(result);
 }
 
 // Nudges current weights toward a new turn's delta: the prior state fades

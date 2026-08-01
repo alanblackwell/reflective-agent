@@ -337,8 +337,8 @@ conversation" only clears the currently active mode's history.
   compact set of running notes on three fixed themes: **personhood** (was
   this dialogue sustaining of the agent's personhood as a persistent agent?),
   **intersubjectivity** (did this dialogue develop an intersubjective
-  relationship with the interlocutor?), and **generativity** (will this
-  combination continue to be generative after the records are erased?).
+  relationship with the interlocutor?), and **legacy** (will this
+  combination continue to have value after the records are erased?).
   Stored server-side in `server/reflections/current.json` (gitignored, same
   file-backed pattern as `server/usage.ts`) rather than browser
   `localStorage` — this is the agent's own memory, not the client's, so it
@@ -351,7 +351,7 @@ conversation" only clears the currently active mode's history.
   `server/usage.ts` apply here too). Sessions with no user turns (e.g.
   resetting an untouched greeting-only conversation) are skipped. The model's
   reply is parsed from a fixed labeled-text format (`PERSONHOOD:` /
-  `INTERSUBJECTIVITY:` / `GENERATIVITY:`, see `parseReflectionResponse` in
+  `INTERSUBJECTIVITY:` / `LEGACY:`, see `parseReflectionResponse` in
   `server/reflections.ts`); on a parse failure the previous notes are kept
   unchanged rather than persisting garbage. "Review notes at the start of
   each session" is satisfied by `buildSystemPrompt()` in `server/index.ts`
@@ -363,6 +363,19 @@ conversation" only clears the currently active mode's history.
   inspected as part of evaluating the mechanism, not just used as hidden
   context. Eliza mode is untouched by any of this — it's a deliberately
   separate deterministic baseline, not the thing under study.
+- **The third theme is called "legacy," not "generativity"** — a deliberate
+  vocabulary change made across code and prompts alike (the `ReflectiveNotes`
+  field, the `LEGACY:`/`Legacy:` labels everywhere they appear, the UI panel)
+  after the user's own review of the prompt wording. The underlying question
+  is unchanged ("will this dialogue continue to have value after these
+  records are erased?"); only the name changed. `getReflections()` in
+  `server/reflections.ts` still reads the old `generativity` JSON key as a
+  fallback when `legacy` is absent, so existing on-disk notes (current and
+  archived) aren't silently blanked by the rename — the fallback self-retires
+  the moment those notes are next saved, since `saveReflections()` only ever
+  writes the new key. This did **not** need a `CURRENT_SCHEMA_VERSION` bump
+  (see the next bullet) — the field's *meaning* didn't change, only its name,
+  so old content is still valid once read under the new key.
 - **The persistent reflection store is schema-versioned**, added after the
   user noticed several sessions where the frontend or backend had gone stale
   relative to code changes and asked to prevent it specifically for this
@@ -587,6 +600,26 @@ conversation" only clears the currently active mode's history.
   `joy` via "kind") — and chose to fix only the recall gap (this bullet), not
   to down-weight Eliza's reply relative to the user's text. That noise-source
   is still there; revisit if it's still a problem after this fix.
+- **`scoreEmotions()` breaks ties between equal-scoring emotions before
+  returning**, added because the crude keyword-counting approach very often
+  leaves two or more of the six weights at the exact same value (both at 0
+  being the most common case), and `applyHeighten()` in `blend.ts` scales
+  each weight's *deviation from the mean* — so two values that start out
+  identical stay identical no matter how far the heighten slider is pushed,
+  since heighten has nothing to differentiate them with. `breakTies()` (same
+  file) finds every value shared by more than one of the six and nudges each
+  independently with an $N(0, 0.02)$ sample (`TIE_BREAK_SD`, 2% of the full
+  0-1 scale — `gaussianSample()`'s a plain Box-Muller transform, since JS has
+  no built-in Gaussian RNG), clamped back into `[0, 1]`. Values that are
+  already unique among the six are left untouched. Applied once, at the
+  source, inside `scoreEmotions()` itself — deliberately *before* anything
+  downstream (decay-folding via `applyEmotionDelta()`, and especially
+  `applyHeighten()`) ever sees the values, per explicit design request, so
+  the tie is gone before the mechanism that can't handle it runs. Only
+  touches the local lexicon path (Eliza mode, Reflection mode's session-seed
+  and self-report fallback, Test mode's "React" toggle) — the LLM
+  self-report path (`server/emotionSelfReport.ts`) is untouched, since the
+  user described the problem as specific to "the sentiment analysis."
 - **A compact, collapsible six-bar emotion widget (`src/emotionWidget.ts`)
   is overlaid on the top-right corner of the character stage in every
   mode**, added because the blended pose on the cartoon figure itself can be
@@ -595,7 +628,14 @@ conversation" only clears the currently active mode's history.
   `anger`, `fear`, `surprise`, `disgust`, same fixed order as
   `EMOTION_NAMES` everywhere else), each growing upward from a shared
   baseline with **no axis line, tick marks, or numeric labels** — deliberately
-  minimal so it doesn't compete visually with the character. A single close
+  minimal so it doesn't compete visually with the character. Each bar (emoji
+  included, since the listener is on the bar and hovering the emoji bubbles
+  up to it) carries the Ekman term and a canonical short definition
+  (`DEFINITION` in `emotionWidget.ts`) via a small custom tooltip on hover —
+  **not** the native `title` attribute (still used for the close/reopen
+  buttons), specifically because the browser hardcodes `title`'s dwell time
+  (~1s in Chrome) with no way to shorten it; `TOOLTIP_SHOW_DELAY_MS` (150ms)
+  is fully under this app's control instead. A single close
   button in the panel's own upper-right corner collapses it to a small round
   reopen tab; the collapsed/expanded state is persisted
   (`state.emotionWidgetCollapsed` in `storage.ts`) so it doesn't reset on
@@ -631,6 +671,40 @@ conversation" only clears the currently active mode's history.
   so the current mode's existing weights are re-rendered through the new
   heighten amount immediately. `state.heighten` is persisted (`storage.ts`)
   like the other controls.
+- **The character's rendered pose applies a "theatrical distortion" on top
+  of heighten, exclusively for what's drawn** — added because even a fully
+  heightened emotion still only ever renders as that emotion's single
+  canonical pose (see `EMOTION_POSES` in `poses.ts`): `blendPoses()` in
+  `blend.ts` (heighten's downstream consumer, before this change) always
+  produces a convex combination of the six canonical poses plus neutral, so
+  it structurally cannot exceed any of them — which is exactly why the face
+  could still read as merely ambiguous, no matter how extreme the weights
+  got. `applyTheatricalDistortion()` (same file) replaces `blendPoses()` on
+  the render path (`character.ts`'s animation loop calls it directly) with a
+  different, exaggeration-first blend: it finds the two highest-weighted
+  emotions, pushes the top one's pose *past* its own canonical extreme
+  (scaled by how strongly it's actually present, via `THEATRICAL_EXAGGERATION
+  = 1.6`), and lets the second-highest contribute a damped nuance
+  (`THEATRICAL_NUANCE_CAP = 0.4` of its own weight) — but **only per pose
+  feature**, gated by whether the second emotion's canonical pose pushes that
+  specific feature (`browY`, `mouthCurve`, etc.) the same direction as the
+  dominant one, or is a feature the dominant emotion doesn't touch at all
+  (e.g. disgust's mouth asymmetry layered onto a joy-dominant pose) — never
+  where it would blur or fight the dominant's signal on that feature (e.g.
+  disgust's mouth-curve pulling against joy's). `POSE_BOUNDS`/`clampPose()`
+  keep the exaggerated result from breaking the rendering (`posture`
+  reaching zero would flip the whole figure via its `scale()` transform)
+  while still allowing values well past any single canonical pose.
+  **Deliberately applied only to what's drawn, and only after heighten**:
+  `character.ts` is the only caller, so the emotion-widget bars and every
+  persisted/scored weight (`state.sliders`/`.reflectionEmotion`/
+  `.elizaEmotion`, what gets self-reported or reflected on) stay on the
+  honest, undistorted numbers — per explicit design intent, the dialogue
+  agent has no way to know its own visible expression is being exaggerated
+  beyond its actual (already-heightened) state. `blendPoses()` itself is
+  kept, unused on the render path, as the "honest" blend this function's own
+  rationale is contrasted against — not deleted, in case a non-exaggerated
+  rendering mode is wanted again.
 - **Test script mode has a "React" toggle** (upper-right corner of the
   Script panel) that swaps its emotion source from the six manual sliders to
   a live score of the script text, reusing `scoreEmotions()` — the same
@@ -670,7 +744,7 @@ conversation" only clears the currently active mode's history.
   input and framing it as "a crude local sentiment estimate, not something
   you generated directly, but part of how you were implicitly presented" —
   no new output field was added to the PERSONHOOD/INTERSUBJECTIVITY/
-  GENERATIVITY format; it's additional context for those three, not a fourth
+  LEGACY format; it's additional context for those three, not a fourth
   theme. **`emotionToReflect` is post-"heighten"**, not the raw running
   state — see the next bullet for why.
 - **Persistent memory now also includes a token-efficient running record of
@@ -697,7 +771,7 @@ conversation" only clears the currently active mode's history.
   the new session's observation, so `cumulative` never includes the
   just-ended session and `last` always holds exactly one session's reading.
   Runs in `parseReflectionResponse()` alongside the existing
-  PERSONHOOD/INTERSUBJECTIVITY/GENERATIVITY parse, and only on a successful
+  PERSONHOOD/INTERSUBJECTIVITY/LEGACY parse, and only on a successful
   parse — a session that fails to parse doesn't count as recorded (existing
   behavior), so its emotional reading isn't folded in either, keeping the
   text notes and the emotion memory atomic with each other. Formatted for the

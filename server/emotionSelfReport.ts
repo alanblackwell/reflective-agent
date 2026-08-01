@@ -10,21 +10,13 @@ export type EmotionSnapshot = Partial<Record<(typeof EMOTION_ORDER)[number], num
 const TAG_PATTERN = /\n?\[emotion:\s*([^\]]*)\]\s*$/i;
 
 export const EMOTION_SELF_REPORT_INSTRUCTION =
-  "\n\nYou are the language output of a larger embodied reflective agent. " +
-  "That agent has a body with its own real, continuously maintained " +
-  "emotional state — you are not a stateless assistant describing the " +
-  "conversation from outside it, you are that agent's voice. After your " +
-  "reply, on its own line, report the agent's actual emotional state " +
-  "arising from this exchange as a tag in exactly this format, with each " +
-  "value a number from 0 (not present) to 1 (strongly present): " +
-  "[emotion: joy=0.00 sadness=0.00 anger=0.00 fear=0.00 surprise=0.00 disgust=0.00]. " +
-  "This is a report of what the agent feels, not an analysis of the " +
-  "dialogue's tone — most values will be 0 or close to it, only rate " +
-  "what's genuinely present. Do not hedge or disclaim this state elsewhere " +
-  "in your reply (e.g. don't say something like 'as an AI I don't really " +
-  "feel this') — for this agent, the state is real and yours to report. " +
-  "This tag is stripped before the reply is shown or spoken, so it must be " +
-  "the very last thing you write, with nothing after it.";
+  "\n\nYou speak as the embodied agent's voice — it has a real, ongoing " +
+  "emotional state; don't describe the conversation from outside it or " +
+  "hedge that state as unreal. After your reply, on its own line, append " +
+  "your actual felt state as: [emotion: joy=0.00 sadness=0.00 anger=0.00 " +
+  "fear=0.00 surprise=0.00 disgust=0.00] (0-1 each; most values near 0 — " +
+  "rate only what's genuinely present). This tag is stripped before the " +
+  "reply is shown or spoken, so it must be the last thing you write.";
 
 export interface ParsedReply {
   text: string;

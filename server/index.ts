@@ -6,6 +6,7 @@ import { DAILY_TOKEN_BUDGET, getUsage, isBudgetExceeded, recordUsage, resetUsage
 import { dailyLogout, ensureDailyAuth, msUntilNextLocalMidnight } from "./auth";
 import { EMOTION_SELF_REPORT_INSTRUCTION, parseSelfReportedEmotion } from "./emotionSelfReport";
 import { ACTIVE_MODEL } from "./models";
+import { DEFAULT_PERSONA_ID, PERSONA_OPTIONS, getPersonaById } from "./personas";
 import {
   REFLECTION_SYSTEM_PROMPT,
   archiveCurrentReflections,
@@ -24,16 +25,25 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
 
 // Responses are read aloud via TTS and shown as short chat pills, so keep
 // them brief and free of formatting that doesn't make sense spoken aloud.
-const BASE_SYSTEM_PROMPT =
-  "You are a friendly conversational voice agent. Your replies are read aloud " +
-  "via text-to-speech and shown as short chat bubbles, so keep them brief " +
-  "(1-3 sentences), conversational, and free of markdown, lists, or headings.";
+// Kept separate from persona text (server/personas.ts) — this constraint
+// applies regardless of which persona is selected.
+const RESPONSE_FORMAT_INSTRUCTION =
+  " Your replies are read aloud via text-to-speech and shown as short chat " +
+  "bubbles, so keep them brief (1-3 sentences), conversational, and free of " +
+  "markdown, lists, or headings.";
 
 // The persisted reflective notes (see reflections.ts) are appended fresh on
 // every call so each new Reflection-mode session "reviews" them from its
-// very first reply, with no separate session-start round-trip needed.
-function buildSystemPrompt(): string {
-  return BASE_SYSTEM_PROMPT + EMOTION_SELF_REPORT_INSTRUCTION + formatReflectionsForSystemPrompt(getReflections());
+// very first reply, with no separate session-start round-trip needed. The
+// reflective notes store is global/shared across all personas (not scoped
+// per persona) — a deliberate v1 simplification.
+function buildSystemPrompt(personaId: string): string {
+  return (
+    getPersonaById(personaId).systemPrompt +
+    RESPONSE_FORMAT_INSTRUCTION +
+    EMOTION_SELF_REPORT_INSTRUCTION +
+    formatReflectionsForSystemPrompt(getReflections())
+  );
 }
 
 interface ChatMessage {
@@ -86,12 +96,19 @@ app.post("/api/usage/reset", (_req, res) => {
   res.json(resetUsage());
 });
 
+// Only { id, label } — the systemPrompt text itself has no functional need
+// to reach the client, so it stays server-side.
+app.get("/api/personas", (_req, res) => {
+  res.json(PERSONA_OPTIONS.map(({ id, label }) => ({ id, label })));
+});
+
 app.post("/api/chat", async (req, res) => {
   const messages = req.body?.messages;
   if (!Array.isArray(messages) || messages.length === 0 || !messages.every(isChatMessage)) {
     res.status(400).json({ error: "messages must be a non-empty array of {role, content}" });
     return;
   }
+  const personaId = typeof req.body?.personaId === "string" ? req.body.personaId : DEFAULT_PERSONA_ID;
 
   // Hard limit: checked BEFORE calling the API, so an exhausted budget can't
   // spend a single additional token.
@@ -111,7 +128,7 @@ app.post("/api/chat", async (req, res) => {
       // (it only changes when the persisted notes are updated between
       // sessions), so it's cacheable on its own breakpoint alongside the
       // conversation-history one in withCacheBreakpoint() below.
-      system: [{ type: "text", text: buildSystemPrompt(), cache_control: { type: "ephemeral" } }],
+      system: [{ type: "text", text: buildSystemPrompt(personaId), cache_control: { type: "ephemeral" } }],
       messages: withCacheBreakpoint(messages),
     });
 

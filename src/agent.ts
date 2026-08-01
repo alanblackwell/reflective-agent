@@ -7,6 +7,7 @@ const USAGE_URL = `${BASE_URL}/api/usage`;
 const USAGE_RESET_URL = `${BASE_URL}/api/usage/reset`;
 const REFLECT_URL = `${BASE_URL}/api/reflect`;
 const REFLECTIONS_URL = `${BASE_URL}/api/reflections`;
+const PERSONAS_URL = `${BASE_URL}/api/personas`;
 
 interface ApiMessage {
   role: "user" | "assistant";
@@ -63,14 +64,14 @@ function toApiMessages(history: DialogTurn[]): ApiMessage[] {
   }));
 }
 
-export async function getAgentReply(history: DialogTurn[]): Promise<AgentReplyResult> {
+export async function getAgentReply(history: DialogTurn[], personaId: string): Promise<AgentReplyResult> {
   const messages = toApiMessages(history);
 
   try {
     const res = await fetch(CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, personaId }),
     });
     const data = await res.json().catch(() => ({}));
 
@@ -103,6 +104,23 @@ export async function getAgentReply(history: DialogTurn[]): Promise<AgentReplyRe
       budgetExceeded: false,
       emotion: null,
     };
+  }
+}
+
+// Only { id, label } — the full persona catalog (systemPrompt text) lives
+// server-side only, see server/personas.ts.
+export interface PersonaSummary {
+  id: string;
+  label: string;
+}
+
+export async function fetchPersonas(): Promise<PersonaSummary[] | null> {
+  try {
+    const res = await fetch(PERSONAS_URL);
+    if (!res.ok) return null;
+    return (await res.json()) as PersonaSummary[];
+  } catch {
+    return null;
   }
 }
 

@@ -784,6 +784,56 @@ conversation" only clears the currently active mode's history.
   Reflective notes UI panel (`index.html`/`main.ts`) as a fourth row
   alongside the three text notes, for the same "inspectable, not just hidden
   context" reason the others are shown.
+- **Reflection mode's conversational persona is a switchable preset, chosen
+  from the UI, deliberately decoupled from the Charlie Brown avatar and its
+  child-tuned TTS voice.** Until now the system prompt was a single generic
+  `BASE_SYSTEM_PROMPT` constant with no personality at all. `server/personas.ts`
+  (new file, mirrors the `MODEL_OPTIONS`/`ACTIVE_MODEL` pattern in
+  `server/models.ts`) defines `PERSONA_OPTIONS: PersonaOption[]` (`id`,
+  `label`, `systemPrompt`) plus `getPersonaById()`, which falls back to
+  `DEFAULT_PERSONA_ID` ("default") for any unknown/missing id — persona
+  selection is **per-request**, not a build-time constant like
+  `ACTIVE_MODEL`, since it's meant to be picked from the UI and compared.
+  `server/index.ts`'s old `BASE_SYSTEM_PROMPT` was split into two concerns
+  that were previously conflated: the persona's own voice (now in
+  `personas.ts`) and the hard TTS/brevity constraint that applies regardless
+  of persona (`RESPONSE_FORMAT_INSTRUCTION`, still in `index.ts`).
+  `buildSystemPrompt(personaId)` composes `persona.systemPrompt +
+  RESPONSE_FORMAT_INSTRUCTION + EMOTION_SELF_REPORT_INSTRUCTION +
+  formatReflectionsForSystemPrompt(getReflections())` — the reflective notes
+  block deliberately isn't persona-specific text either. A new `GET
+  /api/personas` returns only `{ id, label }[]` (never the `systemPrompt`
+  text — no reason for it to reach the client). `/api/chat` reads
+  `personaId` from the request body, defaulting to `DEFAULT_PERSONA_ID`.
+  On the client, `state.personaId` (`src/storage.ts`) is persisted like
+  every other setting; `#persona-select` in `index.html` is left empty and
+  populated at init from `fetchPersonas()` (`src/agent.ts`, mirrors
+  `fetchReflections()`) rather than hardcoded `<option>`s, so adding a new
+  persona to the server-side catalog needs no frontend change. The dropdown
+  is hidden outside Reflection mode (`applyMode()` in `main.ts`, same
+  `classList.toggle("hidden", ...)` idiom as the usage panel) since Eliza
+  and Test-script modes never call the LLM. **Switching persona mid-session
+  resets the Reflection dialog**, reusing the exact same flow as the "Reset
+  conversation" button: the button's click-handler body was extracted into
+  a shared `resetCurrentDialog()` function, called both by the button and by
+  `#persona-select`'s `change` listener (only while in Reflection mode) — so
+  the outgoing persona's session still gets reflected on in the background
+  before the history clears for the incoming persona.
+  **Deliberately out of scope for this pass, per explicit user decision:**
+  the persistent reflective memory (personhood/intersubjectivity/legacy
+  notes + emotion memory, `server/reflections.ts`) stays a single global
+  store shared across all personas, not split per persona — switching
+  personas does not change what the agent's persistent notes say. Kept
+  simple on purpose; revisit as a per-persona `reflections/<personaId>.json`
+  store (threading `personaId` through `getReflections()`/
+  `saveReflections()`/`/api/chat`/`/api/reflect`) if experimentation shows
+  mixing memory across personas is a problem worth solving. The first
+  persona defined (`sidney-student`) is a Sidney Sussex College, Cambridge
+  graduate from a working-class Yorkshire household — tune its wording
+  directly in `server/personas.ts`, or add more entries there to compare.
+  Two more entries (`placeholder-1`/`placeholder-2`) sit in the catalog with
+  empty `systemPrompt`s, reserved for personas Alan is still defining
+  offline — selectable but inert (no persona-specific text) until filled in.
 
 ## Known issues / open items for the next session
 

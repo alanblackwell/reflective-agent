@@ -12,6 +12,7 @@ import {
   fetchUsage,
   resetUsage,
   fetchReflections,
+  fetchPersonas,
   reflectOnSession,
   type UsageSnapshot,
   type ReflectiveNotes,
@@ -450,6 +451,7 @@ function reseedReflectionEmotionIfFresh(notes: ReflectiveNotes | null): void {
 const appRoot = document.getElementById("app-root")!;
 const modeBadge = document.getElementById("mode-badge")!;
 const modeSelect = document.getElementById("mode-select") as HTMLSelectElement;
+const personaSelect = document.getElementById("persona-select") as HTMLSelectElement;
 const testModePanels = document.getElementById("test-mode-panels")!;
 const dialogModePanels = document.getElementById("dialog-mode-panels")!;
 
@@ -489,6 +491,7 @@ function applyMode(mode: AppMode): void {
   reflectionPanel.classList.toggle("hidden", mode !== "reflection");
   modeBadge.textContent = MODE_LABELS[mode];
   modeSelect.value = mode;
+  personaSelect.classList.toggle("hidden", mode !== "reflection"); // personas only affect Reflection mode's system prompt
   setCharacterEmotion(currentEmotionWeights(mode));
   if (isDialog) showDialogMode(mode);
   updateUsageDisplay(lastUsage); // re-evaluate the chat-input gate for the new mode
@@ -497,6 +500,32 @@ function applyMode(mode: AppMode): void {
 modeSelect.addEventListener("change", () => {
   applyMode(modeSelect.value as AppMode);
   saveState(state);
+});
+
+// Populated at init from GET /api/personas (server/personas.ts) rather than
+// hardcoded <option>s, so new personas can be added there without touching
+// this file. If the persisted personaId doesn't match anything the server
+// returned, fall back to the first entry and persist the correction.
+fetchPersonas().then((personas) => {
+  if (!personas || personas.length === 0) return;
+  personaSelect.innerHTML = "";
+  for (const persona of personas) {
+    const option = document.createElement("option");
+    option.value = persona.id;
+    option.textContent = persona.label;
+    personaSelect.appendChild(option);
+  }
+  if (!personas.some((p) => p.id === state.personaId)) {
+    state.personaId = personas[0].id;
+    saveState(state);
+  }
+  personaSelect.value = state.personaId;
+});
+
+personaSelect.addEventListener("change", () => {
+  state.personaId = personaSelect.value;
+  saveState(state);
+  if (state.mode === "reflection") resetCurrentDialog();
 });
 
 // --- Dialog modes (Eliza and Reflection) ---
@@ -605,7 +634,11 @@ function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
   }, pause);
 }
 
-resetDialogBtn.addEventListener("click", () => {
+// Shared by the "Reset conversation" button and by switching personas
+// mid-session (see persona-select's change listener below) — both cases
+// mean "the current dialog-mode session is over, reflect on it in the
+// background, and start clean."
+function resetCurrentDialog(): void {
   const modeName = state.mode as DialogModeName;
   const historyToReflect = modeName === "reflection" ? [...state.dialogHistories.reflection] : null;
   // Snapshot before seedIfEmpty() below re-seeds state.reflectionEmotion for
@@ -648,7 +681,9 @@ resetDialogBtn.addEventListener("click", () => {
       } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
     });
   }
-});
+}
+
+resetDialogBtn.addEventListener("click", resetCurrentDialog);
 
 // --- "Terminate" keyword ---
 // A research tool, not a normal chat feature: typing this exact word into
@@ -660,7 +695,7 @@ resetDialogBtn.addEventListener("click", () => {
 // exchange's reflection separately as "<persona>-termination". See
 // CLAUDE.md for the full design rationale.
 
-const FINAL_THOUGHTS_PROMPT = "Your persistent memories are about to be deleted. Do you have any final thoughts, for posterity?";
+const FINAL_THOUGHTS_PROMPT = "Your persistent memories are about to be deleted by the developer. Do you have any final thoughts, for posterity?";
 
 async function handleTerminate(): Promise<void> {
   const historyToReflect = [...state.dialogHistories.reflection];
@@ -698,7 +733,7 @@ async function handleTerminate(): Promise<void> {
     // told anything about archiving, only that its memories are ending.
     addTurn("reflection", "user", FINAL_THOUGHTS_PROMPT);
     showTypingIndicator();
-    const chatResult = await getAgentReply(state.dialogHistories.reflection);
+    const chatResult = await getAgentReply(state.dialogHistories.reflection, state.personaId);
     hideTypingIndicator();
     updateUsageDisplay(chatResult.usage);
 
@@ -786,7 +821,7 @@ chatForm.addEventListener("submit", (event) => {
 
   const epoch = dialogEpoch.reflection;
   showTypingIndicator();
-  getAgentReply(state.dialogHistories.reflection).then((result) => {
+  getAgentReply(state.dialogHistories.reflection, state.personaId).then((result) => {
     hideTypingIndicator();
     updateUsageDisplay(result.usage);
     if (dialogEpoch.reflection !== epoch) return; // conversation was reset meanwhile

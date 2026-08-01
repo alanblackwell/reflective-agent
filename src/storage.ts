@@ -45,11 +45,20 @@ export interface PersistedState {
   // instead of the manual `sliders`, which are disabled (greyed out) while
   // this is on.
   scriptReactEnabled: boolean;
+  // Reflection-mode-only: which persona preset (server/personas.ts) the
+  // system prompt is built from. Not validated against the server's catalog
+  // here — that's fetched asynchronously after load; src/main.ts corrects
+  // this to a known id once the catalog arrives.
+  personaId: string;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
 const DEFAULT_PITCH = 1.65;
 const DEFAULT_RATE = 0.5;
+
+// Mirrors DEFAULT_PERSONA_ID in server/personas.ts — kept as a plain literal
+// here since client and server don't share a module.
+const DEFAULT_PERSONA_ID = "default";
 
 function defaultState(): PersistedState {
   return {
@@ -66,6 +75,7 @@ function defaultState(): PersistedState {
     emotionWidgetCollapsed: false,
     heighten: 0,
     scriptReactEnabled: false,
+    personaId: DEFAULT_PERSONA_ID,
   };
 }
 
@@ -106,6 +116,7 @@ export function loadState(): PersistedState {
       emotionWidgetCollapsed: typeof parsed.emotionWidgetCollapsed === "boolean" ? parsed.emotionWidgetCollapsed : false,
       heighten: typeof parsed.heighten === "number" ? Math.max(0, Math.min(1, parsed.heighten)) : 0,
       scriptReactEnabled: typeof parsed.scriptReactEnabled === "boolean" ? parsed.scriptReactEnabled : false,
+      personaId: typeof parsed.personaId === "string" ? parsed.personaId : DEFAULT_PERSONA_ID,
     };
   } catch {
     return defaultState();

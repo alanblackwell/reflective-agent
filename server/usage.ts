@@ -96,3 +96,14 @@ export function recordUsage(inputTokens: number, outputTokens: number): UsageSna
   saveUsage(usage);
   return toSnapshot(usage);
 }
+
+// Manual escape hatch, triggered by the "reset for today" button that
+// appears once the bar goes red (see updateUsageDisplay() in main.ts) — an
+// explicit user override of their own conservative default, not a change to
+// the budget itself. Zeroes today's counted tokens without touching
+// DAILY_TOKEN_BUDGET, so the same cap applies again from zero.
+export function resetUsage(): UsageSnapshot {
+  const usage: UsageRecord = { date: todayKey(), inputTokens: 0, outputTokens: 0 };
+  saveUsage(usage);
+  return toSnapshot(usage);
+}

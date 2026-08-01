@@ -4,6 +4,7 @@ import { zeroWeights, type EmotionWeights } from "./blend";
 const BASE_URL = "http://localhost:8787";
 const CHAT_URL = `${BASE_URL}/api/chat`;
 const USAGE_URL = `${BASE_URL}/api/usage`;
+const USAGE_RESET_URL = `${BASE_URL}/api/usage/reset`;
 const REFLECT_URL = `${BASE_URL}/api/reflect`;
 const REFLECTIONS_URL = `${BASE_URL}/api/reflections`;
 
@@ -115,6 +116,18 @@ export async function fetchUsage(): Promise<UsageSnapshot | null> {
   }
 }
 
+// Manual override for the "reset for today" button — see resetUsage() in
+// server/usage.ts for what this actually does server-side.
+export async function resetUsage(): Promise<UsageSnapshot | null> {
+  try {
+    const res = await fetch(USAGE_RESET_URL, { method: "POST" });
+    if (!res.ok) return null;
+    return (await res.json()) as UsageSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 // The agent's persistent memory across Reflection-mode sessions — running
 // notes on three fixed themes, stored server-side (see server/reflections.ts).
 // Dialogue content itself is never required to persist between sessions.
@@ -141,14 +154,46 @@ export interface ReflectiveNotes {
 export interface ReflectResult {
   skipped: boolean;
   notes: ReflectiveNotes | null;
+  // The archive filename the server actually used (see
+  // archiveCurrentReflections() in server/reflections.ts), when this call
+  // passed an archiveLabel option. Null otherwise, or if the call was
+  // skipped before reaching the server.
+  archivedTo: string | null;
   usage: UsageSnapshot | null;
 }
 
-export async function fetchReflections(): Promise<ReflectiveNotes | null> {
+// Options for the "terminate" keyword flow (see handleTerminate() in
+// main.ts) — archiving a named snapshot of the just-computed notes, and
+// optionally resetting the live store back to blank afterward. Bundled into
+// the same /api/reflect call server-side rather than a separate endpoint.
+export interface ReflectOptions {
+  archiveLabel?: string;
+  resetAfterArchive?: boolean;
+}
+
+// Surfaced when the persistent store's on-disk schema version didn't match
+// what the server code expects — the old notes were archived (not deleted)
+// and reset (see migrateReflectionsSchema() in server/reflections.ts). The
+// server only sends this once (per its own one-shot consumeMigrationNotice()),
+// which is why this is bundled into fetchReflections() specifically, not
+// ReflectiveNotes itself (also used by ReflectResult.notes, which has no
+// notice concept).
+export interface ReflectionMigrationNotice {
+  fromVersion: number;
+  archivedTo: string;
+}
+
+export interface ReflectionsFetchResult {
+  notes: ReflectiveNotes;
+  migrationNotice: ReflectionMigrationNotice | null;
+}
+
+export async function fetchReflections(): Promise<ReflectionsFetchResult | null> {
   try {
     const res = await fetch(REFLECTIONS_URL);
     if (!res.ok) return null;
-    return (await res.json()) as ReflectiveNotes;
+    const { migrationNotice, ...notes } = await res.json();
+    return { notes: notes as ReflectiveNotes, migrationNotice: migrationNotice ?? null };
   } catch {
     return null;
   }
@@ -161,21 +206,32 @@ export async function fetchReflections(): Promise<ReflectiveNotes | null> {
 export async function reflectOnSession(
   history: DialogTurn[],
   emotion: EmotionWeights | null = null,
+  options: ReflectOptions = {},
 ): Promise<ReflectResult> {
   const messages = toApiMessages(history);
-  if (messages.length === 0) return { skipped: true, notes: null, usage: null };
+  if (messages.length === 0) return { skipped: true, notes: null, archivedTo: null, usage: null };
 
   try {
     const res = await fetch(REFLECT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, emotion }),
+      body: JSON.stringify({
+        messages,
+        emotion,
+        archiveLabel: options.archiveLabel ?? null,
+        resetAfterArchive: options.resetAfterArchive ?? false,
+      }),
     });
     if (!res.ok) throw new Error(`Backend returned ${res.status}`);
     const data = await res.json();
-    return { skipped: Boolean(data.skipped), notes: data.notes ?? null, usage: data.usage ?? null };
+    return {
+      skipped: Boolean(data.skipped),
+      notes: data.notes ?? null,
+      archivedTo: data.archivedTo ?? null,
+      usage: data.usage ?? null,
+    };
   } catch (err) {
     console.error("Reflection request failed:", err);
-    return { skipped: true, notes: null, usage: null };
+    return { skipped: true, notes: null, archivedTo: null, usage: null };
   }
 }

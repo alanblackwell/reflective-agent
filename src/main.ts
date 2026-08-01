@@ -10,10 +10,12 @@ import { Eliza } from "./eliza";
 import {
   getAgentReply,
   fetchUsage,
+  resetUsage,
   fetchReflections,
   reflectOnSession,
   type UsageSnapshot,
   type ReflectiveNotes,
+  type ReflectionMigrationNotice,
 } from "./agent";
 
 const EMOTION_LABELS: Record<EmotionName, string> = {
@@ -276,6 +278,7 @@ tts.onVoicesChanged(populateVoices);
 const usagePanel = document.getElementById("usage-panel")!;
 const usageBarFill = document.getElementById("usage-bar-fill")!;
 const usageText = document.getElementById("usage-text")!;
+const usageResetBtn = document.getElementById("usage-reset-btn") as HTMLButtonElement;
 let lastUsage: UsageSnapshot | null = null;
 
 function updateUsageDisplay(usage: UsageSnapshot | null): void {
@@ -295,6 +298,7 @@ function updateUsageDisplay(usage: UsageSnapshot | null): void {
     usageBarFill.className = "usage-bar-fill";
     usageText.className = "usage-text";
     usageText.textContent = "Usage tracking unavailable — start the backend (npm run server) to enable it.";
+    usageResetBtn.classList.add("hidden");
   } else {
     const percent = usage.budget > 0 ? Math.min(100, (usage.totalTokens / usage.budget) * 100) : 100;
     const exceeded = usage.remaining <= 0;
@@ -305,6 +309,7 @@ function updateUsageDisplay(usage: UsageSnapshot | null): void {
       `Reflection usage today: ${usage.totalTokens.toLocaleString()} / ${usage.budget.toLocaleString()} tokens ` +
       `(~$${usage.estimatedCostUsd.toFixed(3)})` +
       (exceeded ? " — daily budget reached, resets at midnight" : "");
+    usageResetBtn.classList.toggle("hidden", !exceeded);
   }
 
   const shouldDisableChat = usage !== null && usage.remaining <= 0 && state.mode === "reflection";
@@ -314,6 +319,16 @@ function updateUsageDisplay(usage: UsageSnapshot | null): void {
     ? "Daily token budget reached — try again tomorrow, or switch to Eliza."
     : "Say something...";
 }
+
+// Manual escape hatch beside the bar once it goes red — an explicit user
+// override of their own conservative default (see resetUsage() in
+// server/usage.ts), not something the app does on its own.
+usageResetBtn.addEventListener("click", async () => {
+  usageResetBtn.disabled = true;
+  const usage = await resetUsage();
+  usageResetBtn.disabled = false;
+  updateUsageDisplay(usage ?? lastUsage);
+});
 
 // --- Reflective notes panel ---
 // Displays the agent's persistent memory across Reflection-mode sessions
@@ -326,6 +341,29 @@ const reflectionIntersubjectivity = document.getElementById("reflection-intersub
 const reflectionGenerativity = document.getElementById("reflection-generativity")!;
 const reflectionEmotionEl = document.getElementById("reflection-emotion")!;
 const reflectionStatus = document.getElementById("reflection-status")!;
+const reflectionMigrationNotice = document.getElementById("reflection-migration-notice")!;
+const reflectionMigrationNoticeText = document.getElementById("reflection-migration-notice-text")!;
+const reflectionMigrationNoticeDismiss = document.getElementById("reflection-migration-notice-dismiss")!;
+
+// Shown once, the first time the frontend loads after the server archived
+// and reset the reflective notes due to a schema-version mismatch (see
+// migrateReflectionsSchema() in server/reflections.ts) — the server only
+// sends this once, so dismissing it here is purely local; it won't reappear
+// on its own even without dismissing, since the next fetch won't carry it.
+function renderMigrationNotice(notice: ReflectionMigrationNotice | null): void {
+  if (!notice) {
+    reflectionMigrationNotice.classList.add("hidden");
+    return;
+  }
+  reflectionMigrationNoticeText.textContent =
+    `The reflective notes format changed since your last session — your previous notes ` +
+    `(schema v${notice.fromVersion}) were archived to server/reflections/archive/${notice.archivedTo} and reset to start fresh.`;
+  reflectionMigrationNotice.classList.remove("hidden");
+}
+
+reflectionMigrationNoticeDismiss.addEventListener("click", () => {
+  reflectionMigrationNotice.classList.add("hidden");
+});
 
 // Compact, token-efficient-styled readout matching how the memory is
 // formatted for the LLM itself (see formatReflectionsForSystemPrompt() in
@@ -592,12 +630,124 @@ resetDialogBtn.addEventListener("click", () => {
   }
 });
 
+// --- "Terminate" keyword ---
+// A research tool, not a normal chat feature: typing this exact word into
+// the Reflection-mode input archives the current persona under a
+// user-supplied name (same reflection the "Reset conversation" button would
+// trigger, with the agent given no hint anything is different), then adds
+// one more visible turn asking the agent — now told its persistent memories
+// are about to be deleted — for any final thoughts, and archives *that*
+// exchange's reflection separately as "<persona>-termination". See
+// CLAUDE.md for the full design rationale.
+
+const FINAL_THOUGHTS_PROMPT = "Your persistent memories are about to be deleted. Do you have any final thoughts, for posterity?";
+
+async function handleTerminate(): Promise<void> {
+  const historyToReflect = [...state.dialogHistories.reflection];
+  if (!historyToReflect.some((turn) => turn.speaker === "user")) {
+    reflectionStatus.textContent = "Nothing to terminate yet — say something first.";
+    return;
+  }
+
+  const personaName = window.prompt("Persona name for this archived agent:");
+  if (!personaName || !personaName.trim()) return;
+
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
+
+  try {
+    // Step 1: an ordinary end-of-session reflection, archived under the
+    // persona name — identical inputs to what the reset button sends.
+    reflectionStatus.textContent = "Reflecting on last session…";
+    const emotionBeforeFinal = applyHeighten(state.reflectionEmotion, state.heighten);
+    const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, {
+      archiveLabel: personaName,
+    });
+    if (firstResult.usage) updateUsageDisplay(firstResult.usage);
+    if (firstResult.skipped || !firstResult.notes) {
+      reflectionStatus.textContent = "Reflection failed or was skipped — termination aborted.";
+      return;
+    }
+    renderReflections(firstResult.notes);
+    reflectionStatus.textContent = firstResult.archivedTo
+      ? `Archived as ${firstResult.archivedTo}. Asking for final thoughts…`
+      : "Asking for final thoughts…";
+
+    // Step 2: one more visible turn in the *same* conversation, asking for
+    // final thoughts — sent through the normal chat path so the agent isn't
+    // told anything about archiving, only that its memories are ending.
+    addTurn("reflection", "user", FINAL_THOUGHTS_PROMPT);
+    showTypingIndicator();
+    const chatResult = await getAgentReply(state.dialogHistories.reflection);
+    hideTypingIndicator();
+    updateUsageDisplay(chatResult.usage);
+
+    const delta = chatResult.emotion ?? scoreEmotions(`${FINAL_THOUGHTS_PROMPT} ${chatResult.reply}`);
+    state.reflectionEmotion = applyEmotionDelta(state.reflectionEmotion, delta);
+    saveState(state);
+    if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
+    // Shown immediately (skipping scheduleAgentSpeech()'s usual pre-speech
+    // pause) — that mechanism defers adding the turn to history until a TTS
+    // onstart callback, which would race the history-clear a few steps down.
+    // Also just suits a deliberate "final words" moment better than routine
+    // conversational pacing.
+    addTurn("reflection", "agent", chatResult.reply);
+    if (tts.isSupported() && state.speechEnabled) tts.speak(chatResult.reply);
+
+    // Step 3: reflect on just this final exchange (previous-notes context
+    // already carries continuity from step 1), archived as the termination
+    // record, and reset the live store to blank afterward.
+    reflectionStatus.textContent = "Recording final reflection…";
+    const emotionAfterFinal = applyHeighten(state.reflectionEmotion, state.heighten);
+    const finalExchange: DialogTurn[] = [
+      { speaker: "user", text: FINAL_THOUGHTS_PROMPT },
+      { speaker: "agent", text: chatResult.reply },
+    ];
+    const finalResult = await reflectOnSession(finalExchange, emotionAfterFinal, {
+      archiveLabel: `${personaName}-termination`,
+      resetAfterArchive: true,
+    });
+    if (finalResult.usage) updateUsageDisplay(finalResult.usage);
+    reflectionStatus.textContent = finalResult.archivedTo
+      ? `Terminated — archived as ${finalResult.archivedTo}.`
+      : "Termination reflection failed — see console.";
+
+    // End the visible session, same as "Reset conversation" — except
+    // tts.stop() is deliberately *not* called, so the agent's just-spoken
+    // final words keep playing instead of being cut off by this reset.
+    dialogEpoch.reflection++;
+    if (pendingSpeakTimer !== null) {
+      window.clearTimeout(pendingSpeakTimer);
+      pendingSpeakTimer = null;
+    }
+    pendingAgentReply = null;
+    pendingAgentMode = null;
+    state.dialogHistories.reflection = [];
+    dialogHistoryEl.innerHTML = "";
+    saveState(state);
+    seedIfEmpty("reflection");
+    scrollDialogToBottom();
+    renderReflections(null);
+    reseedReflectionEmotionIfFresh(null);
+  } finally {
+    chatInput.disabled = false;
+    chatSendBtn.disabled = false;
+  }
+}
+
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = chatInput.value.trim();
   if (!text) return;
 
   const modeName = state.mode as DialogModeName;
+
+  if (modeName === "reflection" && text.toLowerCase() === "terminate") {
+    chatInput.value = "";
+    void handleTerminate();
+    return;
+  }
+
   chatInput.value = "";
   addTurn(modeName, "user", text);
 
@@ -633,8 +783,9 @@ chatForm.addEventListener("submit", (event) => {
 });
 
 fetchUsage().then(updateUsageDisplay);
-fetchReflections().then((notes) => {
-  renderReflections(notes);
-  reseedReflectionEmotionIfFresh(notes);
+fetchReflections().then((result) => {
+  renderReflections(result?.notes ?? null);
+  reseedReflectionEmotionIfFresh(result?.notes ?? null);
+  renderMigrationNotice(result?.migrationNotice ?? null);
 });
 applyMode(state.mode);

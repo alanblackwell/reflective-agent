@@ -121,7 +121,8 @@ conversation" only clears the currently active mode's history.
 - `server/auth.ts` — the daily login/logout flow (see "Key decisions" and
   "Every session, start here" above).
 - `server/reflections.ts` — the persistent reflective component: file-backed
-  storage (`server/.reflections.json`, gitignored) of running notes on three
+  storage (`server/reflections/current.json`, gitignored, with permanent
+  named snapshots in `server/reflections/archive/`) of running notes on three
   fixed themes, plus the prompt-building/parsing for generating and injecting
   them. See "Key decisions" below.
 - `src/emotionLexicon.ts` — crude, zero-cost sentiment scoring (keyword
@@ -297,7 +298,7 @@ conversation" only clears the currently active mode's history.
   **intersubjectivity** (did this dialogue develop an intersubjective
   relationship with the interlocutor?), and **generativity** (will this
   combination continue to be generative after the records are erased?).
-  Stored server-side in `server/.reflections.json` (gitignored, same
+  Stored server-side in `server/reflections/current.json` (gitignored, same
   file-backed pattern as `server/usage.ts`) rather than browser
   `localStorage` — this is the agent's own memory, not the client's, so it
   should survive regardless of which browser/machine talks to the backend.
@@ -321,6 +322,77 @@ conversation" only clears the currently active mode's history.
   inspected as part of evaluating the mechanism, not just used as hidden
   context. Eliza mode is untouched by any of this — it's a deliberately
   separate deterministic baseline, not the thing under study.
+- **The persistent reflection store is schema-versioned**, added after the
+  user noticed several sessions where the frontend or backend had gone stale
+  relative to code changes and asked to prevent it specifically for this
+  file — the one place where staleness is silent and semantically dangerous
+  (Vite HMR keeps the frontend fresh automatically, and `server/usage.ts`'s
+  date-keyed reset already tolerates staleness safely; this store doesn't).
+  `CURRENT_SCHEMA_VERSION` in `server/reflections.ts` is a manually-bumped
+  constant — bump it whenever the *meaning* of stored fields changes (e.g.
+  the three reflection themes, or the `emotionMemory` decay
+  formula/semantics), not for additive changes with safe defaults, which
+  `getReflections()` already tolerates. `saveReflections()` stamps every
+  write with the current version. `migrateReflectionsSchema()` runs once at
+  server startup (`main()` in `server/index.ts`, before `ensureDailyAuth()`):
+  a file with no `schemaVersion` at all predates this mechanism and is
+  treated as *compatible*, not a mismatch, so introducing the tag doesn't
+  itself wipe today's notes — it's just stamped on next save. Only an
+  explicit, differing version number triggers a reset, and even then the old
+  file is archived (renamed to `archive/schema-v{old}.json` — see the next
+  bullet for that directory), never deleted.
+  **Surfaced in the UI, not just logged** — the mismatch case is delivered
+  once via `consumeMigrationNotice()` (a one-shot in-memory notice, cleared
+  after the first `GET /api/reflections` reads it) and shown as a dismissible
+  amber notice in the reflective-notes panel (`renderMigrationNotice()` in
+  `main.ts`). This was a deliberate choice over a console-only reset: this
+  app's whole premise is studying whether persistent reflection matters, so
+  silently wiping the very thing being studied would undercut the
+  experiment.
+- **The reflection store lives in `server/reflections/` (`current.json` +
+  an `archive/` subdirectory), and typing the exact word "terminate" into
+  the Reflection-mode chat input archives the current persona and asks it
+  to reflect on its own ending** — a research tool for deliberately studying
+  how the agent handles the prospect of its persistent memory being erased,
+  added once schema-version archiving (previous bullet) made clear the user
+  wanted proper, permanently-kept, human-named snapshots rather than
+  accident-triggered ones. Old archives are schema-agnostic by design —
+  they're read as plain JSON for research, never reloaded by the app, so
+  `archiveCurrentReflections()` in `server/reflections.ts` just copies
+  whatever is on disk (`copyFileSync`, preserving `schemaVersion` as-is) to
+  `archive/<label>.json`, sanitizing the label (strips anything but
+  `[A-Za-z0-9._-]`, caps length) since it ultimately comes from a browser
+  `prompt()` — this is also the path-traversal defense. A name collision
+  never overwrites: `-2`, `-3`, … is appended instead. `resetReflections()`
+  is `saveReflections(defaultNotes())`, used when a `resetAfterArchive` flag
+  is set. `POST /api/reflect` (`server/index.ts`) gained optional
+  `archiveLabel`/`resetAfterArchive` body fields so "reflect → archive →
+  (optionally) reset" happens atomically in one request rather than a
+  separate archive endpoint. `handleTerminate()` in `main.ts` drives the
+  whole sequence: (1) an ordinary end-of-session reflection — identical
+  inputs to what "Reset conversation" already sends, so the agent has no
+  hint anything is different — archived under a persona name from a
+  `window.prompt()`; (2) one more *visible* turn added to the same live
+  conversation, `FINAL_THOUGHTS_PROMPT` ("Your persistent memories are about
+  to be deleted. Do you have any final thoughts, for posterity?"), sent
+  through the normal `getAgentReply()` path so the agent only ever learns
+  its memory is ending, never that anything is being archived or could be
+  restored; (3) a second reflection scoped to *just that final exchange*
+  (not the whole conversation again — the previous-notes context passed
+  along already carries continuity from step 1), archived as
+  `<persona>-termination` with `resetAfterArchive: true`. The final reply is
+  shown immediately (`addTurn` + `tts.speak()` called directly) rather than
+  through `scheduleAgentSpeech()`'s usual randomized pre-speech pause —
+  that mechanism defers adding the turn to history until a TTS `onstart`
+  callback, which would otherwise race the history-clear that follows a few
+  steps later; skipping the pause also suits a deliberate "final words"
+  moment better than routine conversational pacing. That closing
+  history-clear deliberately does **not** call `tts.stop()` (unlike the
+  reset button's own handler, which it otherwise mirrors) so the agent's
+  just-spoken final words finish playing instead of being cut off. The user
+  manages restoring/forking old archives back into `current.json` by hand —
+  the app has no UI for it, by design (per the user: "I'll manage all this
+  myself with file naming").
 
 - **Reflection mode's per-turn character emotion is now the LLM's own
   self-report, not local keyword scoring** — a deliberate change from the
@@ -542,7 +614,7 @@ conversation" only clears the currently active mode's history.
   was sent — a latent inconsistency with this bullet's own "the avatar's
   visible emotion" framing, fixed as part of this change). Stored server-side
   in `server/reflections.ts` (`ReflectiveNotes.emotionMemory`, same
-  file-backed `.reflections.json` as the three text notes) as two six-number
+  file-backed `current.json` as the three text notes) as two six-number
   vectors, kept deliberately minimal to stay token-efficient since both are
   resent as context on every future call: `last` (the heightened emotion
   vector as it stood at the end of the most recent session — a plain

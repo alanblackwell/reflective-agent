@@ -2,15 +2,19 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import Anthropic from "@anthropic-ai/sdk";
-import { DAILY_TOKEN_BUDGET, getUsage, isBudgetExceeded, recordUsage } from "./usage";
+import { DAILY_TOKEN_BUDGET, getUsage, isBudgetExceeded, recordUsage, resetUsage } from "./usage";
 import { dailyLogout, ensureDailyAuth, msUntilNextLocalMidnight } from "./auth";
 import { EMOTION_SELF_REPORT_INSTRUCTION, parseSelfReportedEmotion } from "./emotionSelfReport";
 import {
   REFLECTION_SYSTEM_PROMPT,
+  archiveCurrentReflections,
   buildReflectionUserMessage,
+  consumeMigrationNotice,
   formatReflectionsForSystemPrompt,
   getReflections,
+  migrateReflectionsSchema,
   parseReflectionResponse,
+  resetReflections,
   saveReflections,
   type EmotionSnapshot,
 } from "./reflections";
@@ -58,6 +62,10 @@ app.get("/api/usage", (_req, res) => {
   res.json(getUsage());
 });
 
+app.post("/api/usage/reset", (_req, res) => {
+  res.json(resetUsage());
+});
+
 app.post("/api/chat", async (req, res) => {
   const messages = req.body?.messages;
   if (!Array.isArray(messages) || messages.length === 0 || !messages.every(isChatMessage)) {
@@ -94,7 +102,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 app.get("/api/reflections", (_req, res) => {
-  res.json(getReflections());
+  res.json({ ...getReflections(), migrationNotice: consumeMigrationNotice() });
 });
 
 app.post("/api/reflect", async (req, res) => {
@@ -110,12 +118,18 @@ app.post("/api/reflect", async (req, res) => {
 
   const previousNotes = getReflections();
   const emotion = isEmotionSnapshot(req.body?.emotion) ? req.body.emotion : null;
+  // Optional archiving, driven by the "terminate" keyword flow in main.ts —
+  // see archiveCurrentReflections()/resetReflections() in reflections.ts.
+  // Bundled into this same request so "reflect -> archive -> (optionally)
+  // reset" is atomic, rather than needing a separate endpoint + round trip.
+  const archiveLabel = typeof req.body?.archiveLabel === "string" ? req.body.archiveLabel : null;
+  const resetAfterArchive = Boolean(req.body?.resetAfterArchive);
 
   // Reflection is best-effort — an exhausted budget must never block the
   // UI's reset action, so this responds 200 with the session skipped rather
   // than an error.
   if (isBudgetExceeded()) {
-    res.json({ skipped: true, notes: previousNotes, usage: getUsage() });
+    res.json({ skipped: true, notes: previousNotes, archivedTo: null, usage: getUsage() });
     return;
   }
 
@@ -131,7 +145,14 @@ app.post("/api/reflect", async (req, res) => {
     const usage = recordUsage(response.usage.input_tokens, response.usage.output_tokens);
     const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes, emotion);
     saveReflections(notes);
-    res.json({ skipped: false, notes, usage });
+
+    let archivedTo: string | null = null;
+    if (archiveLabel) {
+      archivedTo = archiveCurrentReflections(archiveLabel);
+      if (resetAfterArchive) resetReflections();
+    }
+
+    res.json({ skipped: false, notes, archivedTo, usage });
   } catch (err) {
     console.error("Anthropic API error during reflection:", err);
     res.status(502).json({ error: "Failed to reach the language model." });
@@ -162,6 +183,7 @@ process.on("SIGINT", () => void shutdownGracefully("SIGINT"));
 process.on("SIGTERM", () => void shutdownGracefully("SIGTERM"));
 
 async function main(): Promise<void> {
+  migrateReflectionsSchema();
   await ensureDailyAuth();
   scheduleDailyShutdown();
   app.listen(PORT, () => {

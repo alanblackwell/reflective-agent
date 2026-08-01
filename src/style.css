@@ -75,13 +75,26 @@ body {
       "main character";
   }
 
+  /* Column layout: the emotion widget is pinned to the bottom of the
+     character column (bottom of the viewport, since this grid row is 1fr)
+     instead of overlaid on the image's top-right corner — at this width
+     the overlay collided with the image. The svg's auto top/bottom margins
+     absorb the remaining free space evenly, which centers it in the region
+     between the usage bar above and the now-bottom-pinned widget below. */
   .app.dialog-mode #character-stage {
+    flex-direction: column;
     align-items: center;
   }
 
   .app.dialog-mode #character-stage svg {
     height: 150px;
     width: auto;
+    margin: auto 0;
+  }
+
+  .app.dialog-mode #character-stage .emotion-widget {
+    position: static;
+    margin: 0;
   }
 
   .app.dialog-mode .dialog-history {
@@ -169,12 +182,35 @@ h1 {
   gap: 4px;
 }
 
+.usage-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .usage-bar {
-  width: 100%;
+  flex: 1;
   height: 6px;
   border-radius: 999px;
   background: #e5e2da;
   overflow: hidden;
+}
+
+.usage-reset-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #f87171;
+  background: #fff5f5;
+  color: #b91c1c;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.usage-reset-btn:hover {
+  background: #fee2e2;
 }
 
 .usage-bar-fill {
@@ -457,11 +493,53 @@ textarea#script-input {
   min-height: 0;
 }
 
+/* An expanded panel with long notes could otherwise grow past the bottom
+   of a short viewport — .app.dialog-mode clips overflow at the app level,
+   so without its own scroll the tail of the notes would be unreachable.
+   The summary line stays outside the scrolling region so it's always
+   visible as an anchor/toggle. */
+#reflection-notes-panel {
+  max-height: 35vh;
+  overflow-y: auto;
+}
+
 #reflection-notes-panel summary {
   cursor: pointer;
   font-size: 0.95rem;
   font-weight: 600;
   color: #444;
+  position: sticky;
+  top: 0;
+  background: #fff;
+}
+
+.reflection-migration-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff7e6;
+  border: 1px solid #f0c36d;
+  color: #92620a;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.reflection-migration-notice-dismiss {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #b7791f;
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 2px;
+}
+
+.reflection-migration-notice-dismiss:hover {
+  color: #7a5314;
 }
 
 .reflection-note {

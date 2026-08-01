@@ -26,7 +26,17 @@
       </div>
 
       <div id="usage-panel" class="usage-panel">
-        <div class="usage-bar"><div id="usage-bar-fill" class="usage-bar-fill"></div></div>
+        <div class="usage-bar-row">
+          <div class="usage-bar"><div id="usage-bar-fill" class="usage-bar-fill"></div></div>
+          <button
+            id="usage-reset-btn"
+            class="usage-reset-btn hidden"
+            type="button"
+            title="Reset today's tracked usage to zero and continue"
+          >
+            Reset for today
+          </button>
+        </div>
         <div id="usage-text" class="usage-text">Loading usage…</div>
       </div>
 
@@ -83,6 +93,17 @@
       <div id="dialog-mode-panels" class="hidden">
         <details id="reflection-notes-panel" class="panel hidden">
           <summary>Reflective notes</summary>
+          <div id="reflection-migration-notice" class="reflection-migration-notice hidden">
+            <span id="reflection-migration-notice-text"></span>
+            <button
+              id="reflection-migration-notice-dismiss"
+              class="reflection-migration-notice-dismiss"
+              type="button"
+              aria-label="Dismiss notice"
+            >
+              ✕
+            </button>
+          </div>
           <div class="reflection-note">
             <span class="reflection-note-label">Personhood</span>
             <p id="reflection-personhood"></p>

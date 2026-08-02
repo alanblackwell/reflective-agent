@@ -12,6 +12,7 @@ import {
   archiveCurrentReflections,
   buildReflectionUserMessage,
   consumeMigrationNotice,
+  formatReflectionSummary,
   formatReflectionsForSystemPrompt,
   getReflections,
   migrateReflectionsSchema,
@@ -20,6 +21,15 @@ import {
   saveReflections,
   type EmotionSnapshot,
 } from "./reflections";
+import {
+  appendHeightenChange,
+  appendPersonaChange,
+  appendTurn,
+  discardCurrentSessionIfEmpty,
+  recordReflection,
+  startSession,
+  type JournalRole,
+} from "./journal";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
 
@@ -135,7 +145,14 @@ app.post("/api/chat", async (req, res) => {
     const textBlock = response.content.find((block) => block.type === "text");
     const usage = recordUsage(response.usage.input_tokens, response.usage.output_tokens);
     const { text: reply, emotion } = parseSelfReportedEmotion(textBlock?.type === "text" ? textBlock.text : "");
-    res.json({ reply, usage, emotion });
+    // Tokens spent by this single call (system prompt + full resent history +
+    // reply) — distinct from `usage`, which is the running daily total. Lets
+    // the frontend show a per-turn cost alongside the cumulative one.
+    const turnTokens = response.usage.input_tokens + response.usage.output_tokens;
+    // Every /api/chat call is inherently a Reflection-mode turn — no mode
+    // check needed. No-ops quietly if no journal session is open.
+    appendTurn(messages[messages.length - 1].content, reply);
+    res.json({ reply, usage, emotion, turnTokens });
   } catch (err) {
     console.error("Anthropic API error:", err);
     res.status(502).json({ error: "Failed to reach the language model." });
@@ -165,11 +182,33 @@ app.post("/api/reflect", async (req, res) => {
   // reset" is atomic, rather than needing a separate endpoint + round trip.
   const archiveLabel = typeof req.body?.archiveLabel === "string" ? req.body.archiveLabel : null;
   const resetAfterArchive = Boolean(req.body?.resetAfterArchive);
+  // Distinguishes an ordinary end-of-session reflection from the two-stage
+  // "terminate" flow (see handleTerminate() in main.ts and the module
+  // comment in journal.ts) — defaults to "normal" for the ordinary
+  // Reset-conversation case.
+  const journalRole: JournalRole =
+    req.body?.journalRole === "deferred" || req.body?.journalRole === "termination" ? req.body.journalRole : "normal";
+  // Identifies which journal page this reflection is for — the session that
+  // was open when the client kicked off this call, which may no longer be
+  // the server's "active" journal session by the time this (LLM-backed, so
+  // potentially slow) call actually resolves. See journal.ts's dual-slot
+  // comment for why this matters.
+  const journalFilename = typeof req.body?.journalFilename === "string" ? req.body.journalFilename : null;
 
   // Reflection is best-effort — an exhausted budget must never block the
   // UI's reset action, so this responds 200 with the session skipped rather
   // than an error.
   if (isBudgetExceeded()) {
+    // For "deferred" (terminate flow's Step 1), the client aborts the whole
+    // termination in place and leaves the live dialogue untouched — so the
+    // journal session must stay open exactly as it was, not be finalized
+    // here. "normal"/"termination" both lead the client to move on to a new
+    // session regardless of this skip, so finalize now with a placeholder —
+    // otherwise the page would be left open (unclosed dialogue section) and
+    // the *next* session's start would still patch a next-link onto it.
+    if (journalRole !== "deferred") {
+      recordReflection("(No reflection recorded — the daily token budget was reached.)", journalRole, journalFilename);
+    }
     res.json({ skipped: true, notes: previousNotes, archivedTo: null, usage: getUsage() });
     return;
   }
@@ -191,17 +230,65 @@ app.post("/api/reflect", async (req, res) => {
     const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes, emotion);
     saveReflections(notes);
 
+    // Computed before recordReflection() below so a "termination" call can
+    // record which archive file holds this exact snapshot (see journal.ts).
     let archivedTo: string | null = null;
     if (archiveLabel) {
       archivedTo = archiveCurrentReflections(archiveLabel);
       if (resetAfterArchive) resetReflections();
     }
 
-    res.json({ skipped: false, notes, archivedTo, usage });
+    recordReflection(formatReflectionSummary(notes), journalRole, journalFilename, archivedTo);
+
+    // Tokens spent by this single reflection call — see the matching field on
+    // /api/chat's response.
+    const turnTokens = response.usage.input_tokens + response.usage.output_tokens;
+    res.json({ skipped: false, notes, archivedTo, usage, turnTokens });
   } catch (err) {
     console.error("Anthropic API error during reflection:", err);
+    // See the isBudgetExceeded() branch above for why "deferred" is skipped
+    // here but "normal"/"termination" still finalize the journal page.
+    if (journalRole !== "deferred") {
+      recordReflection("(No reflection recorded — the language model call failed.)", journalRole, journalFilename);
+    }
     res.status(502).json({ error: "Failed to reach the language model." });
   }
+});
+
+// --- Journal (server/journal.ts) ---
+// Human-readable HTML archive of Reflection-mode sessions, for research
+// review — see journal.ts's module comment for the full design. All four
+// routes are fire-and-forget from the client's perspective (see agent.ts) —
+// a journalling hiccup must never surface as a dialogue-breaking error.
+
+app.post("/api/journal/start", (req, res) => {
+  const personaId = typeof req.body?.personaId === "string" ? req.body.personaId : DEFAULT_PERSONA_ID;
+  const heighten = typeof req.body?.heighten === "number" ? req.body.heighten : 0;
+  const greeting = typeof req.body?.greeting === "string" ? req.body.greeting : "";
+  // Returned filename lets the client target this exact session on its
+  // later /api/journal/discard or /api/reflect call, unambiguously — see
+  // journal.ts's dual-slot comment for why that matters.
+  const filename = startSession(personaId, heighten, greeting);
+  res.json({ ok: true, filename });
+});
+
+app.post("/api/journal/discard", (req, res) => {
+  const filename = typeof req.body?.filename === "string" ? req.body.filename : null;
+  discardCurrentSessionIfEmpty(filename);
+  res.json({ ok: true });
+});
+
+app.post("/api/journal/heighten-change", (req, res) => {
+  const from = typeof req.body?.from === "number" ? req.body.from : 0;
+  const to = typeof req.body?.to === "number" ? req.body.to : 0;
+  appendHeightenChange(from, to);
+  res.json({ ok: true });
+});
+
+app.post("/api/journal/persona-change", (req, res) => {
+  const personaId = typeof req.body?.personaId === "string" ? req.body.personaId : DEFAULT_PERSONA_ID;
+  appendPersonaChange(personaId);
+  res.json({ ok: true });
 });
 
 function scheduleDailyShutdown(): void {

@@ -260,6 +260,23 @@ function formatEmotionSnapshot(emotion: EmotionSnapshot | null): string {
   return "\n\nYour emotional state at session end (0-1 each): " + parts.join(" ") + ".";
 }
 
+// Used for the journal's "Reflection" / "Reflection on Termination" blocks
+// (server/journal.ts) — its only caller. Includes developerRequests
+// deliberately: the "never surfaced outside the reflection mechanism"
+// exclusion (see the DEVELOPER REQUESTS bullet in CLAUDE.md) is about
+// keeping it out of ordinary *dialogue*, where the agent could end up
+// addressing the interlocutor as if they were its developer — the journal
+// is a private, human-readable research record for the actual developer,
+// not dialogue, so there's no such risk here.
+export function formatReflectionSummary(
+  notes: Pick<ReflectiveNotes, "personhood" | "intersubjectivity" | "legacy" | "developerRequests">,
+): string {
+  return (
+    `Personhood: ${notes.personhood}\nIntersubjectivity: ${notes.intersubjectivity}\n` +
+    `Legacy: ${notes.legacy}\nDeveloper Requests: ${notes.developerRequests || "(none)"}`
+  );
+}
+
 function formatEmotionVector(vector: FullEmotionVector): string {
   return EMOTION_ORDER.map((name) => `${name}=${vector[name].toFixed(2)}`).join(" ");
 }

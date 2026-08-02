@@ -8,6 +8,10 @@ const USAGE_RESET_URL = `${BASE_URL}/api/usage/reset`;
 const REFLECT_URL = `${BASE_URL}/api/reflect`;
 const REFLECTIONS_URL = `${BASE_URL}/api/reflections`;
 const PERSONAS_URL = `${BASE_URL}/api/personas`;
+const JOURNAL_START_URL = `${BASE_URL}/api/journal/start`;
+const JOURNAL_DISCARD_URL = `${BASE_URL}/api/journal/discard`;
+const JOURNAL_HEIGHTEN_CHANGE_URL = `${BASE_URL}/api/journal/heighten-change`;
+const JOURNAL_PERSONA_CHANGE_URL = `${BASE_URL}/api/journal/persona-change`;
 
 interface ApiMessage {
   role: "user" | "assistant";
@@ -33,6 +37,10 @@ export interface AgentReplyResult {
   // its reply. Null when absent or malformed — the caller falls back to the
   // local lexicon (src/emotionLexicon.ts) in that case.
   emotion: EmotionWeights | null;
+  // Tokens spent by this single call (system prompt + full resent history +
+  // reply) — distinct from `usage.totalTokens`, which is the running daily
+  // total. Null if the call failed before a response came back.
+  turnTokens: number | null;
 }
 
 // Loosely validated: any numeric fields are clamped into [0, 1] and merged
@@ -84,6 +92,7 @@ export async function getAgentReply(history: DialogTurn[], personaId: string): P
         usage: data.usage ?? null,
         budgetExceeded: true,
         emotion: null,
+        turnTokens: null,
       };
     }
     if (!res.ok) throw new Error(`Backend returned ${res.status}`);
@@ -95,6 +104,7 @@ export async function getAgentReply(history: DialogTurn[], personaId: string): P
       usage: data.usage ?? null,
       budgetExceeded: false,
       emotion: parseEmotion(data.emotion),
+      turnTokens: typeof data.turnTokens === "number" ? data.turnTokens : null,
     };
   } catch (err) {
     console.error("Agent backend request failed:", err);
@@ -103,6 +113,7 @@ export async function getAgentReply(history: DialogTurn[], personaId: string): P
       usage: null,
       budgetExceeded: false,
       emotion: null,
+      turnTokens: null,
     };
   }
 }
@@ -182,6 +193,9 @@ export interface ReflectResult {
   // skipped before reaching the server.
   archivedTo: string | null;
   usage: UsageSnapshot | null;
+  // Tokens spent by this single reflection call — see the matching field on
+  // AgentReplyResult. Null when skipped or the call failed.
+  turnTokens: number | null;
 }
 
 // Options for the "terminate" keyword flow (see handleTerminate() in
@@ -191,6 +205,17 @@ export interface ReflectResult {
 export interface ReflectOptions {
   archiveLabel?: string;
   resetAfterArchive?: boolean;
+  // Distinguishes an ordinary end-of-session reflection from the two-stage
+  // "terminate" flow (see handleTerminate() in main.ts and the module
+  // comment in server/journal.ts) — omitted (server defaults to "normal")
+  // for the ordinary Reset-conversation case.
+  journalRole?: "deferred" | "termination";
+  // Identifies which journal page this reflection is for (the filename
+  // returned by startJournal() when the session being reflected on began).
+  // The server's "active" journal session may have already moved on to a
+  // new one by the time this call resolves (see journal.ts's dual-slot
+  // design) — this is what lets it target the right page regardless.
+  journalFilename?: string | null;
 }
 
 // Surfaced when the persistent store's on-disk schema version didn't match
@@ -231,7 +256,7 @@ export async function reflectOnSession(
   options: ReflectOptions = {},
 ): Promise<ReflectResult> {
   const messages = toApiMessages(history);
-  if (messages.length === 0) return { skipped: true, notes: null, archivedTo: null, usage: null };
+  if (messages.length === 0) return { skipped: true, notes: null, archivedTo: null, usage: null, turnTokens: null };
 
   try {
     const res = await fetch(REFLECT_URL, {
@@ -242,6 +267,8 @@ export async function reflectOnSession(
         emotion,
         archiveLabel: options.archiveLabel ?? null,
         resetAfterArchive: options.resetAfterArchive ?? false,
+        journalRole: options.journalRole ?? null,
+        journalFilename: options.journalFilename ?? null,
       }),
     });
     if (!res.ok) throw new Error(`Backend returned ${res.status}`);
@@ -251,9 +278,91 @@ export async function reflectOnSession(
       notes: data.notes ?? null,
       archivedTo: data.archivedTo ?? null,
       usage: data.usage ?? null,
+      turnTokens: typeof data.turnTokens === "number" ? data.turnTokens : null,
     };
   } catch (err) {
     console.error("Reflection request failed:", err);
-    return { skipped: true, notes: null, archivedTo: null, usage: null };
+    return { skipped: true, notes: null, archivedTo: null, usage: null, turnTokens: null };
   }
+}
+
+// --- Journal (server/journal.ts) ---
+// Fire-and-forget by design: a journalling hiccup (backend not running, a
+// stray network error) must never surface as a user-facing failure or block
+// the actual dialogue, so every one of these swallows its own errors.
+
+// Returns the parsed response body on a 2xx, or null on any failure
+// (network error or non-ok status) — used both as a plain success/fail
+// signal and, for the start call, to read back the filename the server
+// assigned.
+async function postJournalOnce(url: string, body: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return null;
+    return await res.json().catch(() => ({}));
+  } catch {
+    return null;
+  }
+}
+
+async function postJournal(url: string, body: unknown): Promise<void> {
+  if (!(await postJournalOnce(url, body))) {
+    console.warn(`Journal request to ${url} failed`);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The backend blocks app.listen() behind the interactive daily-login flow
+// (ensureDailyAuth() in server/index.ts), but the Vite frontend is served
+// independently and immediately — so the very first page load of the day
+// can fire this before port 8787 is even listening. Every other journal call
+// is truly fire-and-forget (a missed heighten/persona-change marker is a
+// small, cosmetic loss), but a failed *start* call is catastrophic: with no
+// session ever established server-side, appendTurn()/recordReflection() will
+// silently no-op for the entire session that follows, even once the backend
+// comes up moments later. Retried with backoff specifically to ride out that
+// startup window rather than losing the whole session's record.
+const START_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+
+// Returns the filename the server assigned to the new session — null if it
+// couldn't be started at all after retries (or returned a malformed
+// response). The caller threads this through to the eventual reflect call
+// for this session, and to discardJournalSession() if it turns out to have
+// no user turns — see journal.ts's dual-slot design for why an explicit
+// filename, not just "whatever's currently active," is what makes those
+// calls target the right page.
+export async function startJournal(personaId: string, heighten: number, greeting: string): Promise<string | null> {
+  const body = { personaId, heighten, greeting };
+  const attempt = async (): Promise<string | null> => {
+    const data = await postJournalOnce(JOURNAL_START_URL, body);
+    return data && typeof data.filename === "string" ? data.filename : null;
+  };
+  const first = await attempt();
+  if (first) return first;
+  for (const delay of START_RETRY_DELAYS_MS) {
+    await sleep(delay);
+    const filename = await attempt();
+    if (filename) return filename;
+  }
+  console.warn("Journal session could not be started after retries — this session will not be journalled.");
+  return null;
+}
+
+export function discardJournalSession(filename: string | null = null): Promise<void> {
+  return postJournal(JOURNAL_DISCARD_URL, { filename });
+}
+
+export function logHeightenChange(from: number, to: number): Promise<void> {
+  return postJournal(JOURNAL_HEIGHTEN_CHANGE_URL, { from, to });
+}
+
+export function logPersonaChange(personaId: string): Promise<void> {
+  return postJournal(JOURNAL_PERSONA_CHANGE_URL, { personaId });
 }

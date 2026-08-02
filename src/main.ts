@@ -14,6 +14,10 @@ import {
   fetchReflections,
   fetchPersonas,
   reflectOnSession,
+  startJournal,
+  discardJournalSession,
+  logHeightenChange,
+  logPersonaChange,
   type UsageSnapshot,
   type ReflectiveNotes,
   type ReflectionMigrationNotice,
@@ -171,6 +175,19 @@ heightenSlider.addEventListener("input", () => {
   setCharacterEmotion(currentEmotionWeights(state.mode));
 });
 
+// Separate from the "input" listener above: "input" fires continuously
+// while dragging (one event per pixel), which would flood the journal with
+// near-duplicate events. "change" fires once per drag gesture, when the
+// user releases the slider — exactly the granularity a journal entry
+// ("changed from X to Y") should record.
+let lastLoggedHeighten = state.heighten;
+heightenSlider.addEventListener("change", () => {
+  if (state.mode === "reflection" && state.heighten !== lastLoggedHeighten) {
+    void logHeightenChange(lastLoggedHeighten, state.heighten);
+  }
+  lastLoggedHeighten = state.heighten;
+});
+
 // --- Test mode "React" toggle ---
 // Swaps Test script mode's emotion source from the manual sliders (disabled
 // and greyed out via sliders-overlay while this is on) to a live score of
@@ -282,7 +299,12 @@ const usageText = document.getElementById("usage-text")!;
 const usageResetBtn = document.getElementById("usage-reset-btn") as HTMLButtonElement;
 let lastUsage: UsageSnapshot | null = null;
 
-function updateUsageDisplay(usage: UsageSnapshot | null): void {
+// `turnTokens` is the cost of the single call that just completed (see
+// AgentReplyResult.turnTokens) — distinct from `usage.totalTokens`, the
+// running daily total. Only passed by actual dialogue-turn call sites (not
+// reflection calls or plain re-renders), so it's omitted there rather than
+// showing a stale figure.
+function updateUsageDisplay(usage: UsageSnapshot | null, turnTokens: number | null = null): void {
   lastUsage = usage;
 
   // Eliza and Test script modes never call the LLM API (see CLAUDE.md) — the
@@ -307,6 +329,7 @@ function updateUsageDisplay(usage: UsageSnapshot | null): void {
     usageBarFill.className = `usage-bar-fill ${exceeded ? "usage-exceeded" : percent >= 80 ? "usage-warning" : ""}`;
     usageText.className = `usage-text ${exceeded ? "usage-exceeded" : ""}`;
     usageText.textContent =
+      (turnTokens !== null ? `Turn consumed ${turnTokens.toLocaleString()} tokens. ` : "") +
       `Reflection usage today: ${usage.totalTokens.toLocaleString()} / ${usage.budget.toLocaleString()} tokens ` +
       `(~$${usage.estimatedCostUsd.toFixed(3)})` +
       (exceeded ? " — daily budget reached, resets at midnight" : "");
@@ -522,10 +545,21 @@ fetchPersonas().then((personas) => {
   personaSelect.value = state.personaId;
 });
 
+// Switching persona no longer resets the dialog (a past deliberate
+// decision, since revisited): the conversation continues live, and /api/chat
+// already takes personaId per-request, so the very next turn simply uses the
+// new persona. If the switch happens mid-conversation (some turn already has
+// a user reply), it's logged as an inline journal event; picking a persona
+// before saying anything is just "choosing this session's persona," not a
+// change worth marking.
 personaSelect.addEventListener("change", () => {
-  state.personaId = personaSelect.value;
+  const newPersonaId = personaSelect.value;
+  const midDialog = state.dialogHistories.reflection.some((t) => t.speaker === "user");
+  state.personaId = newPersonaId;
   saveState(state);
-  if (state.mode === "reflection") resetCurrentDialog();
+  if (state.mode === "reflection" && midDialog) {
+    void logPersonaChange(newPersonaId);
+  }
 });
 
 // --- Dialog modes (Eliza and Reflection) ---
@@ -588,19 +622,48 @@ function addTurn(modeName: DialogModeName, speaker: DialogTurn["speaker"], text:
   }
 }
 
+const REFLECTION_GREETING = "Hi! What's on your mind?";
+
+// The filename of the journal page currently accepting new turns, if any —
+// mirrors server/journal.ts's "active" slot. Lives in `state`
+// (state.openJournalFilename), not a bare module variable, specifically so
+// a page reload mid-conversation doesn't lose track of it — see its field
+// comment in storage.ts. Snapshotted by resetCurrentDialog()/
+// handleTerminate() *before* a new session replaces it, so the reflect call
+// that finalizes the old session can say explicitly which page it's for
+// (journalFilename in ReflectOptions), rather than relying on "whatever's
+// active," which may already have moved on by the time that (LLM-backed,
+// potentially slow) call resolves. See journal.ts's dual-slot comment for
+// the full rationale.
+
+// Fire-and-forget: begins a new journal page for the reflection dialog about
+// to start, snapshotting the current persona/reflective-notes/heighten.
+// Called eagerly, immediately, every time a fresh reflection dialog is
+// seeded — no longer deferred until a previous session's reflect call
+// resolves (the server's dual-slot design in journal.ts is what makes that
+// safe: it can correctly finalize an old session by filename even after a
+// new one has already started accepting turns).
+function startJournalSession(): void {
+  void (async () => {
+    state.openJournalFilename = await startJournal(state.personaId, state.heighten, REFLECTION_GREETING);
+    saveState(state);
+  })();
+}
+
 function seedIfEmpty(modeName: DialogModeName): void {
   if (state.dialogHistories[modeName].length > 0) return;
   if (modeName === "eliza") {
     addTurn("eliza", "agent", eliza.introNotice());
     addTurn("eliza", "agent", eliza.greeting());
   } else {
-    addTurn("reflection", "agent", "Hi! What's on your mind?");
+    addTurn("reflection", "agent", REFLECTION_GREETING);
     // Best-effort seed from whatever notes are already known; if the fetch
     // at boot (or the reflect call after a reset) resolves later, it will
     // reseed on top of this as long as the user hasn't started talking yet.
     state.reflectionEmotion = deriveInitialEmotion(latestNotes);
     saveState(state);
     if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
+    startJournalSession();
   }
 }
 
@@ -634,13 +697,22 @@ function scheduleAgentSpeech(modeName: DialogModeName, reply: string): void {
   }, pause);
 }
 
-// Shared by the "Reset conversation" button and by switching personas
-// mid-session (see persona-select's change listener below) — both cases
-// mean "the current dialog-mode session is over, reflect on it in the
-// background, and start clean."
+// Triggered by the "Reset conversation" button: the current dialog-mode
+// session is over, reflect on it in the background, and start clean.
+// Persona switching no longer goes through this — it now continues the live
+// dialog instead (see personaSelect's change listener). The "terminate"
+// flow (handleTerminate() below) does its own, more elaborate version of
+// this same reset-and-reflect sequence rather than calling this directly.
 function resetCurrentDialog(): void {
   const modeName = state.mode as DialogModeName;
   const historyToReflect = modeName === "reflection" ? [...state.dialogHistories.reflection] : null;
+  // Snapshot before seedIfEmpty() below starts a new journal session and
+  // overwrites state.openJournalFilename — this is the page the session
+  // about to end should be recorded on, threaded through to
+  // reflectOnSession()/discardJournalSession() below so they target it
+  // explicitly rather than "whatever's active by the time the call
+  // resolves" (see journal.ts's dual-slot design).
+  const journalFilenameToReflect = modeName === "reflection" ? state.openJournalFilename : null;
   // Snapshot before seedIfEmpty() below re-seeds state.reflectionEmotion for
   // the new session — this is the emotion as it stood at the end of the
   // session being reflected on. Heighten is applied here deliberately: this
@@ -665,22 +737,41 @@ function resetCurrentDialog(): void {
   state.dialogHistories[modeName] = [];
   dialogHistoryEl.innerHTML = "";
   saveState(state);
+
+  if (modeName !== "reflection") {
+    seedIfEmpty(modeName);
+    scrollDialogToBottom();
+    return;
+  }
+
+  // Skips sessions with no user turns (e.g. immediately resetting a fresh
+  // greeting-only conversation) — matched by discarding rather than
+  // journalling that (near-)empty page.
+  const hasUserTurns = historyToReflect!.some((turn) => turn.speaker === "user");
+  if (!hasUserTurns) {
+    // Discard the empty page *before* starting the new one, specifically —
+    // discarding deletes a file and can roll back which page counts as
+    // "most recent," so the new session's own "previous session" link needs
+    // that to have already happened, not to be racing it.
+    discardJournalSession(journalFilenameToReflect).finally(() => seedIfEmpty(modeName));
+    scrollDialogToBottom();
+    return;
+  }
+
+  // The new session starts right away — no need to wait for the old one's
+  // reflection (an LLM call, so potentially slow) to finish first. The
+  // reflect call below still finalizes the *old* page correctly regardless
+  // of timing, since it names it explicitly via journalFilenameToReflect.
   seedIfEmpty(modeName);
   scrollDialogToBottom();
-
-  // Reflect on the session that just ended, in the background — the reset
-  // above is instant and never waits on this. Skips sessions with no user
-  // turns (e.g. immediately resetting a fresh greeting-only conversation).
-  if (historyToReflect && historyToReflect.some((turn) => turn.speaker === "user")) {
-    reflectionStatus.textContent = "Reflecting on last session…";
-    reflectOnSession(historyToReflect, emotionToReflect).then((result) => {
-      if (result.usage) updateUsageDisplay(result.usage);
-      if (result.notes) {
-        renderReflections(result.notes);
-        reseedReflectionEmotionIfFresh(result.notes);
-      } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
-    });
-  }
+  reflectionStatus.textContent = "Reflecting on last session…";
+  reflectOnSession(historyToReflect!, emotionToReflect, { journalFilename: journalFilenameToReflect }).then((result) => {
+    if (result.usage) updateUsageDisplay(result.usage, result.turnTokens);
+    if (result.notes) {
+      renderReflections(result.notes);
+      reseedReflectionEmotionIfFresh(result.notes);
+    } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
+  });
 }
 
 resetDialogBtn.addEventListener("click", resetCurrentDialog);
@@ -707,6 +798,13 @@ async function handleTerminate(): Promise<void> {
   const personaName = window.prompt("Persona name for this archived agent:");
   if (!personaName || !personaName.trim()) return;
 
+  // Snapshot the page this whole termination sequence is for — it doesn't
+  // change across Steps 1-3 below (no new session starts mid-flow, since
+  // input stays disabled throughout), but naming it explicitly keeps
+  // recordReflection() on the server unambiguous regardless of timing (see
+  // journal.ts's dual-slot design and resetCurrentDialog()'s matching use).
+  const journalFilenameToReflect = state.openJournalFilename;
+
   chatInput.disabled = true;
   chatSendBtn.disabled = true;
 
@@ -717,8 +815,10 @@ async function handleTerminate(): Promise<void> {
     const emotionBeforeFinal = applyHeighten(state.reflectionEmotion, state.heighten);
     const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, {
       archiveLabel: personaName,
+      journalRole: "deferred",
+      journalFilename: journalFilenameToReflect,
     });
-    if (firstResult.usage) updateUsageDisplay(firstResult.usage);
+    if (firstResult.usage) updateUsageDisplay(firstResult.usage, firstResult.turnTokens);
     if (firstResult.skipped || !firstResult.notes) {
       reflectionStatus.textContent = "Reflection failed or was skipped — termination aborted.";
       return;
@@ -735,7 +835,7 @@ async function handleTerminate(): Promise<void> {
     showTypingIndicator();
     const chatResult = await getAgentReply(state.dialogHistories.reflection, state.personaId);
     hideTypingIndicator();
-    updateUsageDisplay(chatResult.usage);
+    updateUsageDisplay(chatResult.usage, chatResult.turnTokens);
 
     const delta = chatResult.emotion ?? scoreEmotions(`${FINAL_THOUGHTS_PROMPT} ${chatResult.reply}`);
     state.reflectionEmotion = applyEmotionDelta(state.reflectionEmotion, delta);
@@ -761,8 +861,10 @@ async function handleTerminate(): Promise<void> {
     const finalResult = await reflectOnSession(finalExchange, emotionAfterFinal, {
       archiveLabel: `${personaName}-termination`,
       resetAfterArchive: true,
+      journalRole: "termination",
+      journalFilename: journalFilenameToReflect,
     });
-    if (finalResult.usage) updateUsageDisplay(finalResult.usage);
+    if (finalResult.usage) updateUsageDisplay(finalResult.usage, finalResult.turnTokens);
     reflectionStatus.textContent = finalResult.archivedTo
       ? `Terminated — archived as ${finalResult.archivedTo}.`
       : "Termination reflection failed — see console.";
@@ -780,6 +882,10 @@ async function handleTerminate(): Promise<void> {
     state.dialogHistories.reflection = [];
     dialogHistoryEl.innerHTML = "";
     saveState(state);
+    // seedIfEmpty() starts the new journal session itself, immediately —
+    // safe regardless of whether finalResult's /api/reflect call has fully
+    // finished on the server by now, since it named its own page explicitly
+    // above rather than relying on timing.
     seedIfEmpty("reflection");
     scrollDialogToBottom();
     renderReflections(null);
@@ -823,7 +929,7 @@ chatForm.addEventListener("submit", (event) => {
   showTypingIndicator();
   getAgentReply(state.dialogHistories.reflection, state.personaId).then((result) => {
     hideTypingIndicator();
-    updateUsageDisplay(result.usage);
+    updateUsageDisplay(result.usage, result.turnTokens);
     if (dialogEpoch.reflection !== epoch) return; // conversation was reset meanwhile
     // Per-turn emotion nudge: prefer the model's own self-report (tagged onto
     // its reply server-side, see server/emotionSelfReport.ts), falling back
@@ -843,4 +949,8 @@ fetchReflections().then((result) => {
   reseedReflectionEmotionIfFresh(result?.notes ?? null);
   renderMigrationNotice(result?.migrationNotice ?? null);
 });
+// applyMode -> showDialogMode -> seedIfEmpty() seeds an empty history on
+// boot; with no deferJournalStart option passed, seedIfEmpty starts the
+// journal session inline — there's no previous session's finalize in
+// flight here to race, so no special-casing is needed at boot.
 applyMode(state.mode);

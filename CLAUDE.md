@@ -813,12 +813,18 @@ conversation" only clears the currently active mode's history.
   is hidden outside Reflection mode (`applyMode()` in `main.ts`, same
   `classList.toggle("hidden", ...)` idiom as the usage panel) since Eliza
   and Test-script modes never call the LLM. **Switching persona mid-session
-  resets the Reflection dialog**, reusing the exact same flow as the "Reset
-  conversation" button: the button's click-handler body was extracted into
-  a shared `resetCurrentDialog()` function, called both by the button and by
-  `#persona-select`'s `change` listener (only while in Reflection mode) — so
-  the outgoing persona's session still gets reflected on in the background
-  before the history clears for the incoming persona.
+  no longer resets the Reflection dialog** — an earlier version of this
+  feature routed persona switches through the same `resetCurrentDialog()`
+  flow as the "Reset conversation" button, but that was revisited when the
+  journalling system (see the dedicated bullet below) needed to represent a
+  mid-dialogue persona change as an inline event, which only makes sense if
+  the dialogue actually continues through it. `personaSelect`'s `change`
+  listener now just updates `state.personaId` — since `/api/chat` already
+  takes `personaId` per-request, the very next turn uses the new persona
+  with no other change needed — and, only if the switch happens mid-dialogue
+  (some turn already has a user reply), logs it to the open journal page via
+  `logPersonaChange()`. Picking a persona before saying anything is treated
+  as just choosing the session's persona, not a change worth marking.
   **Deliberately out of scope for this pass, per explicit user decision:**
   the persistent reflective memory (personhood/intersubjectivity/legacy
   notes + emotion memory, `server/reflections.ts`) stays a single global
@@ -827,13 +833,207 @@ conversation" only clears the currently active mode's history.
   simple on purpose; revisit as a per-persona `reflections/<personaId>.json`
   store (threading `personaId` through `getReflections()`/
   `saveReflections()`/`/api/chat`/`/api/reflect`) if experimentation shows
-  mixing memory across personas is a problem worth solving. The first
-  persona defined (`sidney-student`) is a Sidney Sussex College, Cambridge
-  graduate from a working-class Yorkshire household — tune its wording
-  directly in `server/personas.ts`, or add more entries there to compare.
-  Two more entries (`placeholder-1`/`placeholder-2`) sit in the catalog with
-  empty `systemPrompt`s, reserved for personas Alan is still defining
-  offline — selectable but inert (no persona-specific text) until filled in.
+  mixing memory across personas is a problem worth solving. Besides
+  `default`, the catalog currently has three: `alumna` (a working-class-raised
+  graduate of an old English university, warm/direct/wry), `sensitive-boy`
+  (an 11 year-old who understands more than he says), and `maori-elder` (a
+  Tūhoe elder, measured, speaking Māori when needed) — tune wording directly
+  in `server/personas.ts`, or add more entries there to compare.
+- **A journalling system (`server/journal.ts`) writes a complete,
+  human-readable HTML archive of every Reflection-mode session**, for
+  research review — deliberately separate from the compact reflective notes
+  (`server/reflections.ts`), which are the agent's own working memory, not a
+  transcript. Files live in `server/journal/` (gitignored, like
+  `server/reflections/`), one self-contained page per session (embedded CSS,
+  no external assets), named `NNNN_<timestamp>_<personaId>.html` via a
+  sequence counter kept in `server/journal/.pointer.json`. Each page opens
+  with the persona's full description (small font), the reflective context
+  read in at session start (the *exact* text `formatReflectionsForSystemPrompt()`
+  sent the model, reused verbatim inside a `<pre>` — no duplicated
+  formatting, and guaranteed to match what the agent actually read), and the
+  heighten setting; then the full turn-by-turn dialogue (`User:`/`Agent:`),
+  with inline markers for heighten changes ("Emotion heightening changed
+  from X to Y") and persona changes (name + full description); then a
+  bordered "Reflection" section with the session-end reflection text
+  (`formatReflectionSummary()` in `reflections.ts` — personhood/
+  intersubjectivity/legacy, **and `developerRequests`**, labeled "Developer
+  Requests" (falls back to "(none)" when empty)). Unlike
+  `formatReflectionsForSystemPrompt()` (used for ordinary dialogue's system
+  prompt), which still excludes `developerRequests` — that exclusion is
+  specifically about keeping it out of *dialogue*, where the agent could end
+  up addressing the interlocutor as if they were its developer — the journal
+  is a private, human-readable research record for the actual developer, so
+  there's no such risk including it there; added by explicit request after
+  the first version of this feature omitted it. A terminated session
+  additionally gets a full-width black `AGENT TERMINATED` bar followed by a
+  second "Reflection on Termination" section, then a short documentation
+  line naming exactly which archive file
+  (`server/reflections/archive/<archivedTo>`) holds the persistent
+  reflection state as it stood at that moment — `recordReflection()` in
+  `journal.ts` takes an optional `archivedTo` argument for this, and
+  `server/index.ts`'s `/api/reflect` handler now computes
+  `archiveCurrentReflections()`'s result *before* calling `recordReflection()`
+  (reordered from the original write-then-archive sequence) specifically so
+  that filename is available in time to record. Top and bottom nav bars link
+  to the previous and next session's files (same directory, relative paths).
+  **Server owns all the file I/O** (browsers can't write files); the client
+  just calls the right endpoint at the right lifecycle moment
+  (`src/agent.ts`'s `startJournal`/`discardJournalSession`/
+  `logHeightenChange`/`logPersonaChange`, all fire-and-forget and
+  error-swallowing — a journalling hiccup must never break dialogue). One
+  module-level `currentSession` (no session IDs needed — single-user local
+  app) accumulates HTML fragments and is **rewritten to disk in full on
+  every mutation** (same simplicity as the JSON stores, just producing HTML)
+  — this is what makes the journal incremental/crash-safe rather than
+  assembled once at the end.
+  **Why prev/next linking happens at the *next* session's start, not the
+  current one's finalize:** naively starting session N+1 as soon as
+  `seedIfEmpty()` fires would race the async reflect-and-finalize call for
+  session N, since a filesystem write completes far faster than an LLM
+  call — if N+1's start (which patches N's `<!-- NEXT_LINK_TOP/BOTTOM -->`
+  placeholder comments with a real link) ran before N's own finalize, N
+  would end up linked-to before its "Reflection" section even existed.
+  Fixed by keeping the *visible* dialog reset instant (unchanged UX) while
+  deferring the *journal*-session-start call specifically: `seedIfEmpty()`
+  takes a `deferJournalStart` option; `resetCurrentDialog()` and
+  `handleTerminate()` pass `true` and call `startJournalSession()`
+  themselves only once their reflect call's promise has actually resolved,
+  guaranteeing the server has finished finalizing N (`recordReflection()` in
+  journal.ts, called from `/api/reflect`) before N+1's start request can be
+  sent. Every other caller (app boot into an empty history) has no pending
+  finalize to race, so it lets `seedIfEmpty` start the journal inline.
+  **Sessions with zero user turns are discarded, not journaled** (mirrors
+  `reflectOnSession`'s pre-existing "skip if no user turns" rule) — `POST
+  /api/journal/discard` deletes the in-progress file and rolls the pointer's
+  `lastFilename` back to the discarded session's own predecessor (leaving
+  `nextSeq` untouched: a gap in numbering is harmless, reusing one is not).
+  **The "terminate" flow's two-stage reflection needed a third state**,
+  since its two `/api/reflect` calls (see the "terminate" bullet above) must
+  both land on the *same* journal page: a new `journalRole` field on that
+  endpoint (`"normal"` | `"deferred"` | `"termination"`, threaded through
+  `ReflectOptions` in `agent.ts`) — Step 1 passes `"deferred"`
+  (`recordReflection()` stashes the text as `pendingReflectionText` without
+  closing out the page, since Step 2's final-thoughts exchange still needs
+  to be appended first), Step 3 passes `"termination"` (appends the stashed
+  Step-1 text, the black bar, and its own text, then finalizes). An ordinary
+  Reset-conversation call omits the field (defaults to `"normal"`). If a
+  reflect call is skipped (daily budget exceeded) or fails outright,
+  `"normal"`/`"termination"` still finalize the page with a placeholder
+  string in place of real reflection text (the client moves on to a new
+  session regardless, so leaving the page open would let the *next*
+  session's start patch a next-link onto an unclosed page) — `"deferred"`
+  does nothing in that case, since the client aborts the whole termination
+  in place and the live dialogue continues unaffected, so the journal page
+  must stay open exactly as it was.
+  **Two rounds of real bugs surfaced right after this landed — both fixed,
+  the second requiring a genuine redesign, not a patch.** Discovered when a
+  real session's journal page had the persona/reflective-context header and
+  nothing else — no dialogue, no reflection — despite the session having
+  genuinely happened (proven by its "terminate" archive files existing in
+  `server/reflections/archive/`).
+  **Round 1 — two startup/restart races**, both about `/api/journal/start`
+  never successfully reaching a live `currentSession`: (a) `main()` in
+  `server/index.ts` blocks `app.listen()` behind `await ensureDailyAuth()`
+  (the interactive daily login), but the Vite frontend serves independently
+  and immediately — so the very first page load of the day could fire
+  `/api/journal/start` before port 8787 was even listening, and the
+  fire-and-forget POST (`src/agent.ts`) just gave up on a connection error,
+  permanently, even though the backend came up moments later and served
+  `/api/chat`/`/api/reflect` fine (neither depends on a journal session
+  existing — they just no-op their journal side effects without one). Fixed
+  by giving `startJournal()` retries with backoff (`START_RETRY_DELAYS_MS`,
+  1s/2s/4s/8s) — the one journal call worth retrying, since losing it loses
+  the *entire* session's record, unlike a missed heighten/persona-change
+  marker (still plain fire-and-forget, no retry). (b) A manual backend
+  restart mid-session (`npm run server` has no `tsx watch` — see its own
+  bullet above — required for *any* server code change, and this app was
+  under active development) dropped the purely-in-memory session state the
+  same way. Fixed by persisting it to disk on every mutation and reloading
+  at startup (superseded by Round 2's sidecar, below).
+  **Round 2 — the fix for Round 1 surfaced a deeper, structural bug**: even
+  with retries and restart-persistence, sessions right after a Reset still
+  came up empty. Root cause: starting the next journal session was
+  *deliberately deferred* until the previous session's `/api/reflect` call
+  resolved, specifically to avoid patching a "next" link into a page before
+  its own reflection text existed. But the visible dialog reset is
+  instant (a deliberate, pre-existing UX principle), while reflection is an
+  LLM call taking seconds — easily long enough for a fast-typing user (e.g.
+  someone actively testing the feature) to send a message in the "new"
+  session before the deferred start had even fired, silently dropping it
+  against a session that didn't exist yet. The fix is a real redesign, not
+  a bigger delay: `server/journal.ts` now holds **two slots** —
+  `currentSession` (live, accepts new turns) and `finalizingSession` (a
+  predecessor whose reflect call is still in flight when a new one starts;
+  `startSession()` bumps whatever's in `currentSession` into it before
+  replacing it). `startSession()` is now called *eagerly*, immediately, with
+  no deferral — turns can never outrace it. To keep `recordReflection()`
+  finalizing the *right* page regardless of which slot it's landed in by
+  then, `/api/reflect` gained an explicit `journalFilename` field (threaded
+  through `ReflectOptions` in `agent.ts`, and `main.ts`'s module-level
+  `openJournalFilename`, snapshotted by `resetCurrentDialog()`/
+  `handleTerminate()` *before* the new session's start overwrites it) —
+  `recordReflection()` matches by filename first, falling back to
+  `finalizingSession ?? currentSession` only if none was supplied. Next-link
+  patching now happens at *both* ends defensively (`startSession()`'s
+  best-effort patch for the common case where the predecessor already
+  finished, plus a symmetric patch in `recordReflection()`'s finalize step
+  for the case where the successor started first) — safe because
+  `patchNextLink()` is idempotent (paired markers, not one-shot). The one
+  exception to "always eager": the *discard* path (a session reset with zero
+  user turns) still discards the old page *before* starting the new one —
+  discarding can delete a file and roll back which page counts as "most
+  recent," and the new session's own "previous" link is baked in at creation
+  time with no mechanism to retroactively edit it, so getting that ordering
+  right avoids a dangling link to a file that's about to disappear.
+  `discardCurrentSessionIfEmpty()` also gained the same explicit-filename
+  targeting as `recordReflection()`, for the same reason. The two-slot state
+  is persisted together in `server/journal/.session-state.json` (renamed
+  from Round 1's `.current-session.json`, whose shape it outgrew), reloaded
+  at startup, so restart-recovery still works. Verified with two scripted
+  tests: a two-process restart-recovery test (unchanged from Round 1: start
+  + one turn in process A, exit without finalizing; a genuinely fresh
+  process B recovers it from the sidecar and finalizes it with content from
+  both sides of the simulated restart), and a new single-process race test
+  reproducing Round 2 exactly — session N gets a turn, session N+1 starts
+  and gets a turn *before* N's reflect call resolves, confirming N+1's turn
+  isn't lost, N's reflection lands on N's own page (not N+1's), and the
+  discard-then-relink chain (N+2 started and immediately discarded, N+3
+  started next) correctly skips the discarded page in both directions.
+  **One acknowledged residual limitation:** the `finalizingSession` slot
+  only holds one entry — if a second reflect call would need it before the
+  first one lands (two resets, each with real dialogue, within the same few
+  seconds), the older one's journal record is dropped with a console
+  warning rather than corrupting either page. This needs two genuinely
+  back-to-back reflect calls to overlap, which shouldn't happen in normal,
+  human-paced use.
+  **Round 3 — the client-side half of that same targeting mechanism could
+  itself be lost.** `main.ts` tracked which journal page a conversation
+  belonged to (`openJournalFilename`, threaded into reflect calls as
+  `journalFilename`) as a bare in-memory module variable — fine as long as
+  the page never reloads mid-conversation, but a reload (a stray browser
+  refresh; Vite's own dev-mode full-reload-on-file-change, which is what
+  actually surfaced this) resets it to nothing while
+  `state.dialogHistories.reflection` keeps going (that part *is*
+  `localStorage`-backed). The eventual reflect call then fell back to
+  `recordReflection()`'s `finalizingSession ?? currentSession` heuristic on
+  the server, which could easily resolve to a brand-new, unrelated session
+  that had started in the meantime — landing a real reflection on the wrong
+  page (turns themselves were never at risk here, only which page the
+  reflection text ends up attributed to). Fixed by moving it into
+  `PersistedState` as `state.openJournalFilename` (`storage.ts`) — persisted
+  and reloaded exactly like every other piece of app state, so it now
+  survives a reload the same way the dialogue history already did.
+  **Not a bug, but confusable with one: the newest journal file is always
+  the live, still-open session, so it's normal for it to show nothing but
+  the opening greeting** — the actual session to look at is the one before
+  it. This caused real confusion while diagnosing the rounds above (files
+  that were genuinely broken looked identical to files that were just not
+  finished yet). Fixed with a small, self-clearing UX affordance rather than
+  documentation alone: `renderDocument()` in `journal.ts` computes a banner
+  ("Dialog not started at time of journal update.") fresh on every render
+  from the live `session.turnCount`, not baked into `session.blocks` — so it
+  shows on the very first write (header + greeting only) and disappears on
+  its own the moment a real turn lands, no separate removal step needed.
 
 ## Known issues / open items for the next session
 

@@ -5,3 +5,4 @@ dist
 .env
 server/.usage.json
 server/reflections/
+server/journal/

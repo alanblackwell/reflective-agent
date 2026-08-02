@@ -50,6 +50,15 @@ export interface PersistedState {
   // here — that's fetched asynchronously after load; src/main.ts corrects
   // this to a known id once the catalog arrives.
   personaId: string;
+  // The filename of the journal page (server/journal.ts) currently
+  // accepting new turns, if any. Persisted (not just an in-memory variable
+  // in main.ts) specifically so a page reload mid-conversation — a stray
+  // browser refresh, or Vite's own dev-mode full-reload-on-file-change —
+  // doesn't lose track of which page the eventual end-of-session reflection
+  // belongs to. Losing it doesn't lose any dialogue (turns are logged
+  // immediately as they happen via /api/chat), only which page the later
+  // reflection text gets attributed to, but it's cheap to just not lose it.
+  openJournalFilename: string | null;
 }
 
 // Tuned to make the "Junior" voice (macOS) read more child-like.
@@ -76,6 +85,7 @@ function defaultState(): PersistedState {
     heighten: 0,
     scriptReactEnabled: false,
     personaId: DEFAULT_PERSONA_ID,
+    openJournalFilename: null,
   };
 }
 
@@ -117,6 +127,7 @@ export function loadState(): PersistedState {
       heighten: typeof parsed.heighten === "number" ? Math.max(0, Math.min(1, parsed.heighten)) : 0,
       scriptReactEnabled: typeof parsed.scriptReactEnabled === "boolean" ? parsed.scriptReactEnabled : false,
       personaId: typeof parsed.personaId === "string" ? parsed.personaId : DEFAULT_PERSONA_ID,
+      openJournalFilename: typeof parsed.openJournalFilename === "string" ? parsed.openJournalFilename : null,
     };
   } catch {
     return defaultState();

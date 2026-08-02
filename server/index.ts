@@ -106,10 +106,14 @@ app.post("/api/usage/reset", (_req, res) => {
   res.json(resetUsage());
 });
 
-// Only { id, label } — the systemPrompt text itself has no functional need
-// to reach the client, so it stays server-side.
+// Full PersonaOption objects, including systemPrompt and any saved voice
+// defaults — the systemPrompt used to be stripped out here since the client
+// had no need for it, but Test script mode's persona voice-tuning workflow
+// (see "Copy persona code" in src/main.ts) needs to round-trip the full
+// object so the user can paste a complete, pasteable entry back into
+// server/personas.ts.
 app.get("/api/personas", (_req, res) => {
-  res.json(PERSONA_OPTIONS.map(({ id, label }) => ({ id, label })));
+  res.json(PERSONA_OPTIONS);
 });
 
 app.post("/api/chat", async (req, res) => {

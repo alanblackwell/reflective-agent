@@ -21,6 +21,7 @@ import {
   type UsageSnapshot,
   type ReflectiveNotes,
   type ReflectionMigrationNotice,
+  type PersonaSummary,
 } from "./agent";
 
 const EMOTION_LABELS: Record<EmotionName, string> = {
@@ -288,6 +289,39 @@ voiceSelect.addEventListener("change", () => {
 populateVoices();
 tts.onVoicesChanged(populateVoices);
 
+// Applies a persona's saved voice/pitch/rate (server/personas.ts, filled in
+// by hand via the "Copy persona code" workflow below) to the live voice
+// controls and TTS config. Fields the persona hasn't been tuned with yet
+// are left untouched — no reset to defaults — so tuning always starts from
+// whatever's currently dialed in. Shared by Test mode's persona picker
+// (pure preview/tuning aid) and Reflection mode's persona select (so
+// switching persona there also updates the — currently hidden but still
+// live — voice/pitch/rate).
+function applyPersonaVoiceIfPresent(persona: PersonaSummary | undefined): void {
+  if (!persona) return;
+  if (typeof persona.voiceURI === "string") {
+    const match = tts.getVoices().find((v) => v.voiceURI === persona.voiceURI);
+    if (match) {
+      voiceSelect.value = match.voiceURI;
+      tts.setVoice(match);
+      state.voiceURI = match.voiceURI;
+    }
+  }
+  if (typeof persona.pitch === "number") {
+    pitchSlider.value = String(persona.pitch);
+    pitchOutput.textContent = persona.pitch.toFixed(2);
+    tts.setPitch(persona.pitch);
+    state.pitch = persona.pitch;
+  }
+  if (typeof persona.rate === "number") {
+    rateSlider.value = String(persona.rate);
+    rateOutput.textContent = persona.rate.toFixed(2);
+    tts.setRate(persona.rate);
+    state.rate = persona.rate;
+  }
+  saveState(state);
+}
+
 // --- Usage indicator ---
 // Reflects the server-enforced daily token budget (server/usage.ts). This is
 // a display of that hard limit, not the enforcement itself — the backend
@@ -475,6 +509,8 @@ const appRoot = document.getElementById("app-root")!;
 const modeBadge = document.getElementById("mode-badge")!;
 const modeSelect = document.getElementById("mode-select") as HTMLSelectElement;
 const personaSelect = document.getElementById("persona-select") as HTMLSelectElement;
+const testPersonaSelect = document.getElementById("test-persona-select") as HTMLSelectElement;
+const voiceCopyBtn = document.getElementById("voice-copy-btn") as HTMLButtonElement;
 const testModePanels = document.getElementById("test-mode-panels")!;
 const dialogModePanels = document.getElementById("dialog-mode-panels")!;
 
@@ -527,22 +563,35 @@ modeSelect.addEventListener("change", () => {
 
 // Populated at init from GET /api/personas (server/personas.ts) rather than
 // hardcoded <option>s, so new personas can be added there without touching
-// this file. If the persisted personaId doesn't match anything the server
-// returned, fall back to the first entry and persist the correction.
-fetchPersonas().then((personas) => {
-  if (!personas || personas.length === 0) return;
-  personaSelect.innerHTML = "";
+// this file. Populates both the header's Reflection-mode select and Test
+// mode's voice-tuning select from the same fetch, and caches the full list
+// (including any saved voiceURI/pitch/rate) for lookups by both selects'
+// change handlers and the "Copy persona code" button below. If the
+// persisted personaId doesn't match anything the server returned, fall
+// back to the first entry and persist the correction.
+let personaCatalog: PersonaSummary[] = [];
+
+function populatePersonaOptions(select: HTMLSelectElement, personas: PersonaSummary[]): void {
+  select.innerHTML = "";
   for (const persona of personas) {
     const option = document.createElement("option");
     option.value = persona.id;
     option.textContent = persona.label;
-    personaSelect.appendChild(option);
+    select.appendChild(option);
   }
+}
+
+fetchPersonas().then((personas) => {
+  if (!personas || personas.length === 0) return;
+  personaCatalog = personas;
+  populatePersonaOptions(personaSelect, personas);
+  populatePersonaOptions(testPersonaSelect, personas);
   if (!personas.some((p) => p.id === state.personaId)) {
     state.personaId = personas[0].id;
     saveState(state);
   }
   personaSelect.value = state.personaId;
+  testPersonaSelect.value = personas[0].id;
 });
 
 // Switching persona no longer resets the dialog (a past deliberate
@@ -551,15 +600,56 @@ fetchPersonas().then((personas) => {
 // new persona. If the switch happens mid-conversation (some turn already has
 // a user reply), it's logged as an inline journal event; picking a persona
 // before saying anything is just "choosing this session's persona," not a
-// change worth marking.
+// change worth marking. Also applies that persona's saved voice/pitch/rate,
+// if any, per the same tuning workflow Test mode uses below — this is the
+// actual point of tuning per-persona voices in the first place.
 personaSelect.addEventListener("change", () => {
   const newPersonaId = personaSelect.value;
   const midDialog = state.dialogHistories.reflection.some((t) => t.speaker === "user");
   state.personaId = newPersonaId;
   saveState(state);
+  applyPersonaVoiceIfPresent(personaCatalog.find((p) => p.id === newPersonaId));
   if (state.mode === "reflection" && midDialog) {
     void logPersonaChange(newPersonaId);
   }
+});
+
+// Test mode's persona picker is a pure tuning aid (no persisted "which
+// persona" state of its own) — selecting one just loads its saved
+// voice/pitch/rate, if any, so it can be auditioned and adjusted with the
+// Speak button before copying the result back out.
+testPersonaSelect.addEventListener("change", () => {
+  applyPersonaVoiceIfPresent(personaCatalog.find((p) => p.id === testPersonaSelect.value));
+});
+
+// Places a complete, pasteable PersonaOption object (server/personas.ts) on
+// the clipboard — id/label/systemPrompt from the selected persona, plus
+// whatever voice/pitch/rate is currently dialed in (not necessarily that
+// persona's previously-saved values, since the point is to paste the
+// *tuned* result). Mirrors reflectionDeveloperRequestsCopyBtn's clipboard +
+// "Copied!" flash pattern below. label/systemPrompt go through
+// JSON.stringify for safe escaping — valid TS string-literal syntax, just
+// emitted as a single line rather than matching personas.ts's existing
+// multi-`+`-line wrapping style; rewrap by hand after pasting if wanted.
+voiceCopyBtn.addEventListener("click", () => {
+  const persona = personaCatalog.find((p) => p.id === testPersonaSelect.value);
+  if (!persona) return;
+  const snippet =
+    `{\n` +
+    `  id: ${JSON.stringify(persona.id)},\n` +
+    `  label: ${JSON.stringify(persona.label)},\n` +
+    `  systemPrompt: ${JSON.stringify(persona.systemPrompt)},\n` +
+    `  voiceURI: ${JSON.stringify(voiceSelect.value)},\n` +
+    `  pitch: ${Number(pitchSlider.value).toFixed(2)},\n` +
+    `  rate: ${Number(rateSlider.value).toFixed(2)},\n` +
+    `},`;
+  navigator.clipboard.writeText(snippet).then(() => {
+    const original = voiceCopyBtn.textContent;
+    voiceCopyBtn.textContent = "Copied!";
+    window.setTimeout(() => {
+      voiceCopyBtn.textContent = original;
+    }, 1500);
+  });
 });
 
 // --- Dialog modes (Eliza and Reflection) ---

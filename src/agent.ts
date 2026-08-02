@@ -118,11 +118,17 @@ export async function getAgentReply(history: DialogTurn[], personaId: string): P
   }
 }
 
-// Only { id, label } — the full persona catalog (systemPrompt text) lives
-// server-side only, see server/personas.ts.
+// Mirrors server/personas.ts's PersonaOption (client and server don't share
+// a module). Includes systemPrompt and any saved voice defaults — needed by
+// Test script mode's persona voice-tuning/"Copy persona code" workflow (see
+// main.ts) to round-trip a complete, pasteable entry.
 export interface PersonaSummary {
   id: string;
   label: string;
+  systemPrompt: string;
+  voiceURI?: string;
+  pitch?: number;
+  rate?: number;
 }
 
 export async function fetchPersonas(): Promise<PersonaSummary[] | null> {

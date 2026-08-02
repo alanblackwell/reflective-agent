@@ -839,6 +839,50 @@ conversation" only clears the currently active mode's history.
   (an 11 year-old who understands more than he says), and `maori-elder` (a
   Tūhoe elder, measured, speaking Māori when needed) — tune wording directly
   in `server/personas.ts`, or add more entries there to compare.
+- **Each persona can also carry its own TTS defaults** — optional
+  `voiceURI`/`pitch`/`rate` fields on `PersonaOption` (`server/personas.ts`)
+  — tuned via a dedicated workflow in **Test script mode**, deliberately
+  *not* written by the server. Test mode's Voice panel gained a `Persona`
+  select (`#test-persona-select` in `index.html`, populated from the same
+  `GET /api/personas` fetch as the header's Reflection-mode select) purely
+  as a tuning aid: picking a persona loads its saved voice/pitch/rate (via
+  `applyPersonaVoiceIfPresent()` in `main.ts`) into the live
+  Voice/Pitch/Rate controls for immediate audition with the Speak button —
+  fields the persona hasn't been tuned with yet are left untouched, never
+  reset to a default, so tuning always starts from whatever's currently
+  dialed in. A "Copy persona code" button (`#voice-copy-btn`) then places a
+  complete, pasteable `PersonaOption` object — id/label/systemPrompt from
+  the selected persona, plus whatever voice/pitch/rate is *currently* dialed
+  in (not necessarily that persona's previously-saved values, since the
+  point is to capture the just-tuned result) — on the clipboard via
+  `navigator.clipboard.writeText()`, mirroring the existing
+  `#reflection-developer-requests-copy` button's clipboard-write-then-flash
+  pattern. The user pastes this into `server/personas.ts` and restarts
+  `npm run server` themselves; **the server never writes to its own source
+  file.** Two designs were considered and rejected in favor of this one: a
+  server-side rewrite of `personas.ts` risked silently reverting
+  hand-edited persona wording, since the running server only ever holds
+  whatever it loaded at last restart (no `tsx watch`, by design — see the
+  daily-auth section above); a separate JSON sidecar file (mirroring
+  `server/usage.ts`'s own pattern) would have avoided that risk, but was
+  rejected too, since the wanted outcome is voice data living inline in
+  `personas.ts` alongside everything else about a persona, not split into a
+  second file. `GET /api/personas` (`server/index.ts`) used to strip every
+  persona down to `{ id, label }` specifically because `systemPrompt` "had
+  no functional need to reach the client" — that's no longer true, since
+  the copy button needs to round-trip the full object, so the endpoint now
+  returns `PERSONA_OPTIONS` in full (`PersonaSummary` in `agent.ts` grew the
+  same fields to match). **`voiceURI` is inherently machine/browser-specific**
+  (it names an installed system/browser voice) — `applyPersonaVoiceIfPresent()`
+  only actually applies it when a voice with that exact `voiceURI` is found
+  via `tts.getVoices()` on the current machine/browser; otherwise it's a
+  silent no-op, the same tolerance `populateVoices()` already uses
+  elsewhere. **Also applies in Reflection mode**, extending the existing
+  header persona select's change handler: switching persona there now also
+  calls `applyPersonaVoiceIfPresent()`, so a persona's saved voice takes
+  over there too (falling back to whatever's currently set if that persona
+  has none yet) — this was judged the actual point of tuning per-persona
+  voices in the first place, not just a Test-mode curiosity.
 - **A journalling system (`server/journal.ts`) writes a complete,
   human-readable HTML archive of every Reflection-mode session**, for
   research review — deliberately separate from the compact reflective notes

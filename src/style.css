@@ -610,6 +610,7 @@ textarea#script-input {
   width: 100%;
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
 }
 
 .dialog-toolbar button {
@@ -624,6 +625,20 @@ textarea#script-input {
 
 .dialog-toolbar button:hover {
   background: #ece8de;
+}
+
+/* Destructive action — same red-accent language as .usage-reset-btn, so it
+   reads as dangerous at a glance next to the routine "New conversation".
+   Selector is scoped under .dialog-toolbar button for specificity, since
+   that base rule already sets border/background/color on the same element. */
+.dialog-toolbar button.full-memory-reset-btn {
+  border-color: #f87171;
+  background: #fff5f5;
+  color: #b91c1c;
+}
+
+.dialog-toolbar button.full-memory-reset-btn:hover {
+  background: #fee2e2;
 }
 
 .dialog-history {

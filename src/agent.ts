@@ -7,6 +7,7 @@ const USAGE_URL = `${BASE_URL}/api/usage`;
 const USAGE_RESET_URL = `${BASE_URL}/api/usage/reset`;
 const REFLECT_URL = `${BASE_URL}/api/reflect`;
 const REFLECTIONS_URL = `${BASE_URL}/api/reflections`;
+const FULL_RESET_URL = `${BASE_URL}/api/reflections/full-reset`;
 const PERSONAS_URL = `${BASE_URL}/api/personas`;
 const JOURNAL_START_URL = `${BASE_URL}/api/journal/start`;
 const JOURNAL_DISCARD_URL = `${BASE_URL}/api/journal/discard`;
@@ -248,6 +249,29 @@ export async function fetchReflections(): Promise<ReflectionsFetchResult | null>
     const { migrationNotice, ...notes } = await res.json();
     return { notes: notes as ReflectiveNotes, migrationNotice: migrationNotice ?? null };
   } catch {
+    return null;
+  }
+}
+
+// "Full memory reset" button (main.ts) — wipes the persistent reflective
+// notes back to blank, with no LLM call involved (unlike the ordinary
+// reflect-on-reset flow above). `filename`, when supplied, is whatever
+// journal page was open when the reset was confirmed, so the server can
+// close it out with a placeholder note instead of leaving it dangling — see
+// server/index.ts. Returns the fresh, blank notes so the UI can render them
+// immediately without a separate fetchReflections() round trip.
+export async function fullMemoryReset(filename: string | null): Promise<ReflectiveNotes | null> {
+  try {
+    const res = await fetch(FULL_RESET_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.notes as ReflectiveNotes) ?? null;
+  } catch (err) {
+    console.error("Full memory reset failed:", err);
     return null;
   }
 }

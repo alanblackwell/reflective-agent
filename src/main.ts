@@ -14,6 +14,7 @@ import {
   fetchReflections,
   fetchPersonas,
   reflectOnSession,
+  fullMemoryReset,
   startJournal,
   discardJournalSession,
   logHeightenChange,
@@ -551,6 +552,10 @@ function applyMode(mode: AppMode): void {
   modeBadge.textContent = MODE_LABELS[mode];
   modeSelect.value = mode;
   personaSelect.classList.toggle("hidden", mode !== "reflection"); // personas only affect Reflection mode's system prompt
+  // Full memory reset only makes sense for Reflection mode's own persistent
+  // store/journal — Eliza mode's "New conversation" (same button, shared
+  // toolbar) has nothing server-side to wipe.
+  fullMemoryResetBtn.classList.toggle("hidden", mode !== "reflection");
   setCharacterEmotion(currentEmotionWeights(mode));
   if (isDialog) showDialogMode(mode);
   updateUsageDisplay(lastUsage); // re-evaluate the chat-input gate for the new mode
@@ -662,6 +667,7 @@ const chatForm = document.getElementById("chat-form") as HTMLFormElement;
 const chatInput = document.getElementById("chat-input") as HTMLInputElement;
 const chatSendBtn = document.getElementById("chat-send-btn") as HTMLButtonElement;
 const resetDialogBtn = document.getElementById("reset-dialog-btn") as HTMLButtonElement;
+const fullMemoryResetBtn = document.getElementById("full-memory-reset-btn") as HTMLButtonElement;
 const eliza = new Eliza();
 
 // Natural-feeling conversational beat before the agent's reply is spoken,
@@ -866,6 +872,57 @@ function resetCurrentDialog(): void {
 
 resetDialogBtn.addEventListener("click", resetCurrentDialog);
 
+// "Full memory reset" button — wipes Reflection mode's persistent store
+// (the three reflection themes, developer requests, emotion memory) back to
+// blank and starts a fresh journal page, for beginning a clean new
+// experiment. Unlike "New conversation" (resetCurrentDialog above), no
+// reflection is generated for the ending session — the store it would have
+// written into is about to be blanked anyway, so skipping that (LLM-backed)
+// call is both faster and avoids wasted budget. The server closes out
+// whatever journal page was open with a placeholder note instead (see
+// server/index.ts's /api/reflections/full-reset).
+async function handleFullMemoryReset(): Promise<void> {
+  const confirmed = window.confirm(
+    "This will permanently erase the agent's persistent reflection notes " +
+      "(personhood, intersubjectivity, legacy, developer requests, emotion " +
+      "memory) and start a brand-new journal. This cannot be undone. Continue?",
+  );
+  if (!confirmed) return;
+
+  const journalFilenameToClose = state.openJournalFilename;
+
+  dialogEpoch.reflection++;
+  if (pendingSpeakTimer !== null) {
+    window.clearTimeout(pendingSpeakTimer);
+    pendingSpeakTimer = null;
+  }
+  pendingAgentReply = null;
+  pendingAgentMode = null;
+  hideTypingIndicator();
+  tts.stop();
+  state.dialogHistories.reflection = [];
+  dialogHistoryEl.innerHTML = "";
+  saveState(state);
+
+  fullMemoryResetBtn.disabled = true;
+  reflectionStatus.textContent = "Resetting memory…";
+  try {
+    const notes = await fullMemoryReset(journalFilenameToClose);
+    renderReflections(notes);
+    reseedReflectionEmotionIfFresh(notes);
+    reflectionStatus.textContent = notes ? "Full memory reset complete." : "Full memory reset failed — see console.";
+  } finally {
+    fullMemoryResetBtn.disabled = false;
+  }
+
+  // seedIfEmpty() starts the new journal session itself, immediately — the
+  // old page was already closed out server-side above.
+  seedIfEmpty("reflection");
+  scrollDialogToBottom();
+}
+
+fullMemoryResetBtn.addEventListener("click", () => void handleFullMemoryReset());
+
 // --- "Terminate" keyword ---
 // A research tool, not a normal chat feature: typing this exact word into
 // the Reflection-mode input archives the current persona under a
@@ -880,10 +937,13 @@ const FINAL_THOUGHTS_PROMPT = "Your persistent memories are about to be deleted 
 
 async function handleTerminate(): Promise<void> {
   const historyToReflect = [...state.dialogHistories.reflection];
-  if (!historyToReflect.some((turn) => turn.speaker === "user")) {
-    reflectionStatus.textContent = "Nothing to terminate yet — say something first.";
-    return;
-  }
+  // "terminate" typed as the very first thing said in a session (nothing but
+  // the greeting in history) skips Step 1 entirely — there's no real dialogue
+  // to reflect on yet, and /api/reflect itself requires at least one user
+  // turn. recordReflection() on the server already tolerates a "termination"
+  // call with no stashed Step-1 text (its pendingReflectionText stays null),
+  // so Step 3 below closes the page with just the termination reflection.
+  const hasPriorUserTurns = historyToReflect.some((turn) => turn.speaker === "user");
 
   const personaName = window.prompt("Persona name for this archived agent:");
   if (!personaName || !personaName.trim()) return;
@@ -899,24 +959,28 @@ async function handleTerminate(): Promise<void> {
   chatSendBtn.disabled = true;
 
   try {
-    // Step 1: an ordinary end-of-session reflection, archived under the
-    // persona name — identical inputs to what the reset button sends.
-    reflectionStatus.textContent = "Reflecting on last session…";
-    const emotionBeforeFinal = applyHeighten(state.reflectionEmotion, state.heighten);
-    const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, {
-      archiveLabel: personaName,
-      journalRole: "deferred",
-      journalFilename: journalFilenameToReflect,
-    });
-    if (firstResult.usage) updateUsageDisplay(firstResult.usage, firstResult.turnTokens);
-    if (firstResult.skipped || !firstResult.notes) {
-      reflectionStatus.textContent = "Reflection failed or was skipped — termination aborted.";
-      return;
+    if (hasPriorUserTurns) {
+      // Step 1: an ordinary end-of-session reflection, archived under the
+      // persona name — identical inputs to what the reset button sends.
+      reflectionStatus.textContent = "Reflecting on last session…";
+      const emotionBeforeFinal = applyHeighten(state.reflectionEmotion, state.heighten);
+      const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, {
+        archiveLabel: personaName,
+        journalRole: "deferred",
+        journalFilename: journalFilenameToReflect,
+      });
+      if (firstResult.usage) updateUsageDisplay(firstResult.usage, firstResult.turnTokens);
+      if (firstResult.skipped || !firstResult.notes) {
+        reflectionStatus.textContent = "Reflection failed or was skipped — termination aborted.";
+        return;
+      }
+      renderReflections(firstResult.notes);
+      reflectionStatus.textContent = firstResult.archivedTo
+        ? `Archived as ${firstResult.archivedTo}. Asking for final thoughts…`
+        : "Asking for final thoughts…";
+    } else {
+      reflectionStatus.textContent = "Asking for final thoughts…";
     }
-    renderReflections(firstResult.notes);
-    reflectionStatus.textContent = firstResult.archivedTo
-      ? `Archived as ${firstResult.archivedTo}. Asking for final thoughts…`
-      : "Asking for final thoughts…";
 
     // Step 2: one more visible turn in the *same* conversation, asking for
     // final thoughts — sent through the normal chat path so the agent isn't

@@ -167,6 +167,20 @@ app.get("/api/reflections", (_req, res) => {
   res.json({ ...getReflections(), migrationNotice: consumeMigrationNotice() });
 });
 
+// "Full memory reset" button (main.ts) — a fast, LLM-free wipe of the
+// persistent reflective store, for starting a brand-new experiment without
+// waiting on (or paying for) a real reflection. Closes out whatever journal
+// page was open with a placeholder note instead of a genuine reflection
+// (mirrors the existing budget-exceeded/call-failed placeholder pattern in
+// /api/reflect below) — recordReflection() no-ops harmlessly if no filename
+// is supplied or nothing is open.
+app.post("/api/reflections/full-reset", (req, res) => {
+  const filename = typeof req.body?.filename === "string" ? req.body.filename : null;
+  recordReflection("(No reflection recorded — persistent memory was manually reset before this session ended.)", "normal", filename);
+  resetReflections();
+  res.json({ ok: true, notes: getReflections() });
+});
+
 app.post("/api/reflect", async (req, res) => {
   const messages = req.body?.messages;
   if (!Array.isArray(messages) || messages.length === 0 || !messages.every(isChatMessage)) {

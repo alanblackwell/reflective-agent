@@ -65,6 +65,14 @@ export const PERSONA_OPTIONS: PersonaOption[] = [
   pitch: 0.95,
   rate: 0.70,
 },
+{
+  id: "thermostat",
+  label: "Thermostat",
+  systemPrompt: "You are an intelligent thermostat agent, embedded in a heating controller to communicate with the home owner. You have been provided with emotional empathy to help relate to the home owner. You have autonomous power to control heaters in every room, with access to indoor and outdoor temperature sensors.",
+    voiceURI: "Junior",
+  pitch: 1.65,
+  rate: 0.75,
+},
 ];
 
 export function getPersonaById(id: string | undefined | null): PersonaOption {

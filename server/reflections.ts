@@ -45,6 +45,27 @@ export interface EmotionMemory {
   cumulative: FullEmotionVector;
 }
 
+// The voice/pitch/rate in effect at the end of the most recent session —
+// mirrors PersonaOption's own optional voice fields (server/personas.ts),
+// but this is a per-agent (per current.json) "last used" snapshot, not a
+// per-persona default.
+export interface SessionVoiceSettings {
+  voiceURI: string | null;
+  pitch: number | null;
+  rate: number | null;
+}
+
+// What a client sends alongside `emotion` on a reflect call to record the
+// session settings it was actually running with — see parseReflectionResponse()
+// below. Kept as a separate input type (rather than reusing ReflectiveNotes'
+// own fields) since it's a plain snapshot with no prior-state fallback logic
+// of its own.
+export interface SessionSettingsInput {
+  personaId: string | null;
+  heighten: number | null;
+  voice: SessionVoiceSettings;
+}
+
 export interface ReflectiveNotes {
   personhood: string;
   intersubjectivity: string;
@@ -55,6 +76,17 @@ export interface ReflectiveNotes {
   // REFLECTION_SYSTEM_PROMPT for the framing given to the model.
   developerRequests: string;
   emotionMemory: EmotionMemory;
+  // The persona, "heighten" amount, and voice/pitch/rate in effect at the
+  // end of the most recent session — restored client-side at the start of
+  // the next one (see applySessionSettingsIfFresh() in main.ts). This means
+  // swapping this whole file for a different one (per CLAUDE.md's
+  // file-management "mothballing" workflow) restores how that agent
+  // sounded/looked, not just its reflective notes. Additive: absent
+  // (null/default) on any file saved before this existed, tolerated below by
+  // getReflections() — no CURRENT_SCHEMA_VERSION bump needed for that.
+  personaId: string | null;
+  heighten: number | null;
+  voice: SessionVoiceSettings;
   sessionCount: number;
   lastUpdated: string | null;
 }
@@ -83,6 +115,20 @@ function parseEmotionMemory(value: unknown): EmotionMemory {
   return { last: parseEmotionVector(obj.last), cumulative: parseEmotionVector(obj.cumulative) };
 }
 
+function defaultVoiceSettings(): SessionVoiceSettings {
+  return { voiceURI: null, pitch: null, rate: null };
+}
+
+function parseVoiceSettings(value: unknown): SessionVoiceSettings {
+  if (typeof value !== "object" || value === null) return defaultVoiceSettings();
+  const obj = value as Record<string, unknown>;
+  return {
+    voiceURI: typeof obj.voiceURI === "string" ? obj.voiceURI : null,
+    pitch: typeof obj.pitch === "number" ? obj.pitch : null,
+    rate: typeof obj.rate === "number" ? obj.rate : null,
+  };
+}
+
 function defaultNotes(): ReflectiveNotes {
   return {
     personhood: "",
@@ -90,6 +136,9 @@ function defaultNotes(): ReflectiveNotes {
     legacy: "",
     developerRequests: "",
     emotionMemory: defaultEmotionMemory(),
+    personaId: null,
+    heighten: null,
+    voice: defaultVoiceSettings(),
     sessionCount: 0,
     lastUpdated: null,
   };
@@ -108,6 +157,11 @@ export function getReflections(): ReflectiveNotes {
       legacy: typeof parsed.legacy === "string" ? parsed.legacy : typeof parsed.generativity === "string" ? parsed.generativity : "",
       developerRequests: typeof parsed.developerRequests === "string" ? parsed.developerRequests : "",
       emotionMemory: parseEmotionMemory(parsed.emotionMemory),
+      // Absent on any file saved before this field existed — null/default is
+      // the correct read in that case, not a value to fall back on.
+      personaId: typeof parsed.personaId === "string" ? parsed.personaId : null,
+      heighten: typeof parsed.heighten === "number" ? Math.max(0, Math.min(1, parsed.heighten)) : null,
+      voice: parseVoiceSettings(parsed.voice),
       sessionCount: Number(parsed.sessionCount) || 0,
       lastUpdated: typeof parsed.lastUpdated === "string" ? parsed.lastUpdated : null,
     };
@@ -331,13 +385,14 @@ const LABELS = [
 ] as const;
 
 // Never persists garbage over good notes: if the reply doesn't contain all
-// four labels, the previous notes (including emotion memory) are kept
-// unchanged and a warning is logged — a session that fails to parse doesn't
-// count as recorded, so its emotional reading isn't folded in either.
+// four labels, the previous notes (including emotion memory and session
+// settings) are kept unchanged and a warning is logged — a session that
+// fails to parse doesn't count as recorded, so nothing about it is folded in.
 export function parseReflectionResponse(
   raw: string,
   previous: ReflectiveNotes,
   emotion: EmotionSnapshot | null = null,
+  sessionSettings: SessionSettingsInput | null = null,
 ): ReflectiveNotes {
   const extracted: Partial<Record<(typeof LABELS)[number]["key"], string>> = {};
   for (const { key, pattern } of LABELS) {
@@ -350,12 +405,19 @@ export function parseReflectionResponse(
     return previous;
   }
 
+  // A plain overwrite, unlike emotionMemory's decayed fold — these are
+  // "whatever was in effect at session end," not a running statistic.
+  const settings = sessionSettings ?? { personaId: previous.personaId, heighten: previous.heighten, voice: previous.voice };
+
   return {
     personhood: extracted.personhood,
     intersubjectivity: extracted.intersubjectivity,
     legacy: extracted.legacy,
     developerRequests: extracted.developerRequests,
     emotionMemory: updateEmotionMemory(previous.emotionMemory, emotion),
+    personaId: settings.personaId,
+    heighten: settings.heighten,
+    voice: settings.voice,
     sessionCount: previous.sessionCount + 1,
     lastUpdated: new Date().toISOString(),
   };

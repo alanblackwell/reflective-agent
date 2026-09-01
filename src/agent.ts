@@ -178,6 +178,13 @@ export interface EmotionMemory {
   cumulative: EmotionWeights;
 }
 
+// Mirrors server/reflections.ts's SessionVoiceSettings.
+export interface SessionVoiceSettings {
+  voiceURI: string | null;
+  pitch: number | null;
+  rate: number | null;
+}
+
 export interface ReflectiveNotes {
   personhood: string;
   intersubjectivity: string;
@@ -187,8 +194,26 @@ export interface ReflectiveNotes {
   // only surfaced in the reflective-notes UI panel.
   developerRequests: string;
   emotionMemory: EmotionMemory;
+  // The persona, heighten amount, and voice/pitch/rate in effect at the end
+  // of the most recent session — see applySessionSettingsIfFresh() in
+  // main.ts, which restores these at the start of the next one.
+  personaId: string | null;
+  heighten: number | null;
+  voice: SessionVoiceSettings;
   sessionCount: number;
   lastUpdated: string | null;
+}
+
+// What main.ts sends alongside `emotion` on a reflect call — a snapshot of
+// what the session was actually running with, recorded server-side onto
+// ReflectiveNotes so the next session can restore it. See
+// currentSessionSettings() in main.ts.
+export interface SessionSettingsSnapshot {
+  personaId: string | null;
+  heighten: number | null;
+  voiceURI: string | null;
+  pitch: number | null;
+  rate: number | null;
 }
 
 export interface ReflectResult {
@@ -283,6 +308,7 @@ export async function fullMemoryReset(filename: string | null): Promise<Reflecti
 export async function reflectOnSession(
   history: DialogTurn[],
   emotion: EmotionWeights | null = null,
+  sessionSettings: SessionSettingsSnapshot | null = null,
   options: ReflectOptions = {},
 ): Promise<ReflectResult> {
   const messages = toApiMessages(history);
@@ -295,6 +321,11 @@ export async function reflectOnSession(
       body: JSON.stringify({
         messages,
         emotion,
+        personaId: sessionSettings?.personaId ?? null,
+        heighten: sessionSettings?.heighten ?? null,
+        voiceURI: sessionSettings?.voiceURI ?? null,
+        pitch: sessionSettings?.pitch ?? null,
+        rate: sessionSettings?.rate ?? null,
         archiveLabel: options.archiveLabel ?? null,
         resetAfterArchive: options.resetAfterArchive ?? false,
         journalRole: options.journalRole ?? null,

@@ -23,6 +23,7 @@ import {
   type ReflectiveNotes,
   type ReflectionMigrationNotice,
   type PersonaSummary,
+  type SessionSettingsSnapshot,
 } from "./agent";
 
 const EMOTION_LABELS: Record<EmotionName, string> = {
@@ -504,6 +505,85 @@ function reseedReflectionEmotionIfFresh(notes: ReflectiveNotes | null): void {
   if (state.mode === "reflection") setCharacterEmotion(state.reflectionEmotion);
 }
 
+// --- Restoring persona/heighten/voice from the persistent reflection notes ---
+// Snapshotted into ReflectiveNotes at the end of every session (see
+// currentSessionSettings() below, sent alongside `emotion` on each reflect
+// call) and restored here at the start of the next one — so swapping
+// server/reflections/current.json for a different one (per CLAUDE.md's
+// file-management "mothballing" workflow) also restores how that agent
+// sounded/looked, not just its text notes. Called from the same sites as
+// reseedReflectionEmotionIfFresh() above, with the same "only while still
+// fresh" guard so it never clobbers a conversation already under way.
+
+function currentSessionSettings(): SessionSettingsSnapshot {
+  return {
+    personaId: state.personaId,
+    heighten: state.heighten,
+    voiceURI: state.voiceURI,
+    pitch: state.pitch,
+    rate: state.rate,
+  };
+}
+
+function applySessionSettingsIfFresh(notes: ReflectiveNotes | null): void {
+  if (!notes) return;
+  const stillFresh = state.dialogHistories.reflection.every((t) => t.speaker !== "user");
+  if (!stillFresh) return;
+
+  // Tracked separately from the voice fields below: only a persona/heighten
+  // change needs the journal session restarted (see the note further down) —
+  // voice/pitch/rate never appear in the journal at all (it's a text
+  // transcript; TTS output isn't part of it).
+  let personaOrHeightenChanged = false;
+
+  if (notes.personaId && notes.personaId !== state.personaId) {
+    state.personaId = notes.personaId;
+    personaSelect.value = notes.personaId; // no-op if the persona catalog isn't populated yet; fetchPersonas() re-applies state.personaId once it is
+    personaOrHeightenChanged = true;
+  }
+  if (typeof notes.heighten === "number" && notes.heighten !== state.heighten) {
+    state.heighten = notes.heighten;
+    heightenSlider.value = String(Math.round(notes.heighten * 100));
+    lastLoggedHeighten = notes.heighten;
+    personaOrHeightenChanged = true;
+  }
+  if (notes.voice?.voiceURI && notes.voice.voiceURI !== state.voiceURI) {
+    // Tolerant no-op if this browser/machine doesn't have that voice
+    // installed — same tolerance applyPersonaVoiceIfPresent() already uses.
+    const match = tts.getVoices().find((v) => v.voiceURI === notes.voice!.voiceURI);
+    if (match) {
+      voiceSelect.value = match.voiceURI;
+      tts.setVoice(match);
+      state.voiceURI = match.voiceURI;
+    }
+  }
+  if (typeof notes.voice?.pitch === "number" && notes.voice.pitch !== state.pitch) {
+    state.pitch = notes.voice.pitch;
+    pitchSlider.value = String(notes.voice.pitch);
+    pitchOutput.textContent = notes.voice.pitch.toFixed(2);
+    tts.setPitch(notes.voice.pitch);
+  }
+  if (typeof notes.voice?.rate === "number" && notes.voice.rate !== state.rate) {
+    state.rate = notes.voice.rate;
+    rateSlider.value = String(notes.voice.rate);
+    rateOutput.textContent = notes.voice.rate.toFixed(2);
+    tts.setRate(notes.voice.rate);
+  }
+
+  saveState(state);
+  if (state.mode === "reflection") setCharacterEmotion(currentEmotionWeights("reflection"));
+
+  // At boot, seedIfEmpty() may already have started this (still-empty)
+  // session's journal page under whatever persona/heighten was in
+  // localStorage *before* this (network) fetch resolved — a real but narrow
+  // race, since fetchReflections() and the initial applyMode() both fire
+  // close together at startup. Re-starting here corrects the journal header
+  // to match; startJournalSession() already discards whatever's open first
+  // (safe, since "still fresh" guarantees zero turns) before starting the
+  // replacement, so this never leaves a stray empty page behind.
+  if (personaOrHeightenChanged && state.openJournalFilename) startJournalSession();
+}
+
 // --- Mode switching ---
 
 const appRoot = document.getElementById("app-root")!;
@@ -740,7 +820,22 @@ const REFLECTION_GREETING = "Hi! What's on your mind?";
 // safe: it can correctly finalize an old session by filename even after a
 // new one has already started accepting turns).
 function startJournalSession(): void {
+  // Only reached when dialogHistories.reflection is empty (seedIfEmpty()'s
+  // early-return already guards this), so a filename still sitting in
+  // state.openJournalFilename here can only belong to a session that got
+  // zero turns (turns are added to both sides in lockstep by appendTurn()) —
+  // and none of resetCurrentDialog()/handleFullMemoryReset()/handleTerminate()
+  // left it set, since each of them nulls it out right after snapshotting it
+  // for their own explicit discard/reflect call. So this can only be a
+  // session from an earlier boot that was abandoned without ever being reset
+  // (e.g. the tab was closed before the user typed anything). Left alone,
+  // that zombie session sits forever in journal.ts's dual-slot state until a
+  // later one displaces it, at which point it's silently dropped with a
+  // console warning (see journal.ts's dual-slot comment) — discard it here
+  // instead, before it can ever reach that point.
+  const staleFilename = state.openJournalFilename;
   void (async () => {
+    if (staleFilename) await discardJournalSession(staleFilename);
     state.openJournalFilename = await startJournal(state.personaId, state.heighten, REFLECTION_GREETING);
     saveState(state);
   })();
@@ -809,6 +904,11 @@ function resetCurrentDialog(): void {
   // explicitly rather than "whatever's active by the time the call
   // resolves" (see journal.ts's dual-slot design).
   const journalFilenameToReflect = modeName === "reflection" ? state.openJournalFilename : null;
+  // Cleared now that it's snapshotted above: this reset is about to
+  // discard/reflect on that exact page explicitly, so startJournalSession()
+  // (called from seedIfEmpty() below) shouldn't also treat it as an
+  // abandoned session needing its own separate discard.
+  if (modeName === "reflection") state.openJournalFilename = null;
   // Snapshot before seedIfEmpty() below re-seeds state.reflectionEmotion for
   // the new session — this is the emotion as it stood at the end of the
   // session being reflected on. Heighten is applied here deliberately: this
@@ -861,13 +961,16 @@ function resetCurrentDialog(): void {
   seedIfEmpty(modeName);
   scrollDialogToBottom();
   reflectionStatus.textContent = "Reflecting on last session…";
-  reflectOnSession(historyToReflect!, emotionToReflect, { journalFilename: journalFilenameToReflect }).then((result) => {
-    if (result.usage) updateUsageDisplay(result.usage, result.turnTokens);
-    if (result.notes) {
-      renderReflections(result.notes);
-      reseedReflectionEmotionIfFresh(result.notes);
-    } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
-  });
+  reflectOnSession(historyToReflect!, emotionToReflect, currentSessionSettings(), { journalFilename: journalFilenameToReflect }).then(
+    (result) => {
+      if (result.usage) updateUsageDisplay(result.usage, result.turnTokens);
+      if (result.notes) {
+        renderReflections(result.notes);
+        reseedReflectionEmotionIfFresh(result.notes);
+        applySessionSettingsIfFresh(result.notes);
+      } else if (!result.skipped) reflectionStatus.textContent = "Reflection failed — see console.";
+    },
+  );
 }
 
 resetDialogBtn.addEventListener("click", resetCurrentDialog);
@@ -890,6 +993,10 @@ async function handleFullMemoryReset(): Promise<void> {
   if (!confirmed) return;
 
   const journalFilenameToClose = state.openJournalFilename;
+  // Cleared now that it's snapshotted above — see resetCurrentDialog()'s
+  // matching comment: the server closes this exact page out itself below, so
+  // startJournalSession() shouldn't also treat it as abandoned.
+  state.openJournalFilename = null;
 
   dialogEpoch.reflection++;
   if (pendingSpeakTimer !== null) {
@@ -910,6 +1017,7 @@ async function handleFullMemoryReset(): Promise<void> {
     const notes = await fullMemoryReset(journalFilenameToClose);
     renderReflections(notes);
     reseedReflectionEmotionIfFresh(notes);
+    applySessionSettingsIfFresh(notes);
     reflectionStatus.textContent = notes ? "Full memory reset complete." : "Full memory reset failed — see console.";
   } finally {
     fullMemoryResetBtn.disabled = false;
@@ -954,6 +1062,15 @@ async function handleTerminate(): Promise<void> {
   // recordReflection() on the server unambiguous regardless of timing (see
   // journal.ts's dual-slot design and resetCurrentDialog()'s matching use).
   const journalFilenameToReflect = state.openJournalFilename;
+  // Cleared now that it's snapshotted above — see resetCurrentDialog()'s
+  // matching comment: this whole flow reflects on and closes this exact page
+  // explicitly, so startJournalSession() shouldn't also treat it as
+  // abandoned.
+  state.openJournalFilename = null;
+  // One snapshot for both Steps 1 and 3 below — persona/heighten/voice don't
+  // change mid-flow (input stays disabled throughout), so there's no "before
+  // vs. after" distinction here the way there is for emotion.
+  const terminationSessionSettings = currentSessionSettings();
 
   chatInput.disabled = true;
   chatSendBtn.disabled = true;
@@ -964,7 +1081,7 @@ async function handleTerminate(): Promise<void> {
       // persona name — identical inputs to what the reset button sends.
       reflectionStatus.textContent = "Reflecting on last session…";
       const emotionBeforeFinal = applyHeighten(state.reflectionEmotion, state.heighten);
-      const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, {
+      const firstResult = await reflectOnSession(historyToReflect, emotionBeforeFinal, terminationSessionSettings, {
         archiveLabel: personaName,
         journalRole: "deferred",
         journalFilename: journalFilenameToReflect,
@@ -1012,7 +1129,7 @@ async function handleTerminate(): Promise<void> {
       { speaker: "user", text: FINAL_THOUGHTS_PROMPT },
       { speaker: "agent", text: chatResult.reply },
     ];
-    const finalResult = await reflectOnSession(finalExchange, emotionAfterFinal, {
+    const finalResult = await reflectOnSession(finalExchange, emotionAfterFinal, terminationSessionSettings, {
       archiveLabel: `${personaName}-termination`,
       resetAfterArchive: true,
       journalRole: "termination",
@@ -1044,6 +1161,7 @@ async function handleTerminate(): Promise<void> {
     scrollDialogToBottom();
     renderReflections(null);
     reseedReflectionEmotionIfFresh(null);
+    applySessionSettingsIfFresh(null);
   } finally {
     chatInput.disabled = false;
     chatSendBtn.disabled = false;
@@ -1101,10 +1219,17 @@ fetchUsage().then(updateUsageDisplay);
 fetchReflections().then((result) => {
   renderReflections(result?.notes ?? null);
   reseedReflectionEmotionIfFresh(result?.notes ?? null);
+  // Runs after applyMode() below in the common case (this is a network
+  // fetch), so if it's booting into a fresh empty session, that session's
+  // journal page may already have been started under stale persona/heighten
+  // settings by then — applySessionSettingsIfFresh() detects that and
+  // restarts it under the restored ones. See that function's own comment.
+  applySessionSettingsIfFresh(result?.notes ?? null);
   renderMigrationNotice(result?.migrationNotice ?? null);
 });
 // applyMode -> showDialogMode -> seedIfEmpty() seeds an empty history on
 // boot; with no deferJournalStart option passed, seedIfEmpty starts the
 // journal session inline — there's no previous session's finalize in
-// flight here to race, so no special-casing is needed at boot.
+// flight here to race, so no special-casing is needed at boot beyond the
+// settings-restoration correction above.
 applyMode(state.mode);

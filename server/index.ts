@@ -20,6 +20,7 @@ import {
   resetReflections,
   saveReflections,
   type EmotionSnapshot,
+  type SessionSettingsInput,
 } from "./reflections";
 import {
   appendHeightenChange,
@@ -194,6 +195,19 @@ app.post("/api/reflect", async (req, res) => {
 
   const previousNotes = getReflections();
   const emotion = isEmotionSnapshot(req.body?.emotion) ? req.body.emotion : null;
+  // The persona/heighten/voice the client was actually running with for this
+  // session — recorded alongside the notes so the next session can restore
+  // them (see SessionSettingsInput's own comment and
+  // applySessionSettingsIfFresh() in main.ts).
+  const sessionSettings: SessionSettingsInput = {
+    personaId: typeof req.body?.personaId === "string" ? req.body.personaId : null,
+    heighten: typeof req.body?.heighten === "number" ? Math.max(0, Math.min(1, req.body.heighten)) : null,
+    voice: {
+      voiceURI: typeof req.body?.voiceURI === "string" ? req.body.voiceURI : null,
+      pitch: typeof req.body?.pitch === "number" ? req.body.pitch : null,
+      rate: typeof req.body?.rate === "number" ? req.body.rate : null,
+    },
+  };
   // Optional archiving, driven by the "terminate" keyword flow in main.ts —
   // see archiveCurrentReflections()/resetReflections() in reflections.ts.
   // Bundled into this same request so "reflect -> archive -> (optionally)
@@ -245,7 +259,7 @@ app.post("/api/reflect", async (req, res) => {
 
     const textBlock = response.content.find((block) => block.type === "text");
     const usage = recordUsage(response.usage.input_tokens, response.usage.output_tokens);
-    const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes, emotion);
+    const notes = parseReflectionResponse(textBlock?.type === "text" ? textBlock.text : "", previousNotes, emotion, sessionSettings);
     saveReflections(notes);
 
     // Computed before recordReflection() below so a "termination" call can
